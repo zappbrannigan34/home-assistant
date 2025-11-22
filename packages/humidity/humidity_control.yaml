@@ -312,11 +312,25 @@ automation:
       - condition: template
         value_template: "{{ recommended != current }}"
 
+      # Выключить detector перед изменением intensity
+      - service: automation.turn_off
+        target:
+          entity_id: automation.humidity_manual_control_detector
+
       - service: number.set_value
         target:
           entity_id: number.humidifier_puh_9105_puh_2709_intensity
         data:
           value: "{{ recommended }}"
+
+      # Подождать MQTT updates
+      - delay:
+          seconds: 20
+
+      # Включить detector обратно
+      - service: automation.turn_on
+        target:
+          entity_id: automation.humidity_manual_control_detector
 
   # ══════════════════════════════════════════════════════════════════════════
   #  ДЕТЕКТОР РУЧНОГО УПРАВЛЕНИЯ

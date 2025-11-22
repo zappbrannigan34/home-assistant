@@ -235,10 +235,14 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
 
 ## История изменений
 
-- **2025-11-22 (v4)**: РЕАЛЬНО ФИНАЛЬНОЕ исправление - увеличен delay до 20 sec:
+- **2025-11-22 (v5)**: ФИНАЛЬНОЕ ФИНАЛЬНОЕ исправление - защита detector также для control_main:
+  - control_main ТОЖЕ вызывает service calls → MQTT updates → detector triggers!
+  - Добавлена защита: control_main выключает detector перед number.set_value, delay 20 sec, включает обратно
+  - Tested: helper остаётся ON 3+ минуты ДАЖЕ когда control_main срабатывает! ✅✅✅
+  - Проблема v4: device_setup защищена, но control_main НЕ была защищена
+- **2025-11-22 (v4)**: Увеличен delay до 20 sec:
   - device_setup: delay увеличен с 5 до 20 секунд (MQTT updates приходили до 14+ секунд)
-  - Tested: helper остаётся включенным 100+ секунд ✅
-  - Проблема была: v3 работала но delay 5 sec был недостаточен для Polaris PUH-9105
+  - Частично работало, но control_main не была защищена
 - **2025-11-22 (v3)**: device_setup теперь временно выключает detector:
   - device_setup: добавлено automation.turn_off detector в начале, automation.turn_on detector через delay в конце
   - Это полностью защищает от ложных срабатываний detector во время device setup
