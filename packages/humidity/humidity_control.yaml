@@ -1,8 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #  АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ УВЛАЖНИТЕЛЕМ POLARIS PUH-9105
 #
-#  Version: 1.1.2
-#  Last Updated: 2025-11-22
+#  Version: 1.2.0
+#  Last Updated: 2025-11-23
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 #  🧪 НАУЧНО ОБОСНОВАННАЯ СИСТЕМА УПРАВЛЕНИЯ ВЛАЖНОСТЬЮ
@@ -50,8 +50,8 @@ template:
         state_class: measurement
         icon: mdi:water-thermometer-outline
         state: >
-            {# Температура в комнате (от датчика sensor-zap) #}
-            {% set T_room = states('sensor.sensor_zap_temperature') | float(22) %}
+            {# Температура в комнате (от датчика sensor-eva) #}
+            {% set T_room = states('sensor.sensor_eva_temperature') | float(22) %}
 
             {# Температура на улице (Met.no weather integration) #}
             {% set T_outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
@@ -104,7 +104,7 @@ template:
         icon: mdi:delta
         state: >
             {% set target = states('sensor.adaptive_target_humidity') | float(45) %}
-            {% set current = states('sensor.sensor_zap_humidity') | float(50) %}
+            {% set current = states('sensor.sensor_eva_humidity') | float(50) %}
             {{ (target - current) | round(1) }}
 
       # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -268,10 +268,10 @@ automation:
         minutes: "/5"
       # При изменении текущей влажности
       - platform: state
-        entity_id: sensor.sensor_zap_humidity
+        entity_id: sensor.sensor_eva_humidity
       # При изменении комнатной температуры
       - platform: state
-        entity_id: sensor.sensor_zap_temperature
+        entity_id: sensor.sensor_eva_temperature
       # При изменении уличной температуры
       - platform: state
         entity_id: weather.forecast_home_assistant
@@ -315,6 +315,22 @@ automation:
                 value_template: "{{ recommended > 0 }}"
               - condition: template
                 value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') != 'on' }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+              - delay:
+                  seconds: 2  # Ждём загрузки устройства
+          # 🔄 PERIODIC HEARTBEAT - защита от MQTT stale state
+          # Если recommended > 0 И switch не менялся >30 минут → отправить turn_on
+          # Гарантирует включение даже при desync (HA показывает "on", устройство физически "off")
+          # turn_on is idempotent - безопасно отправлять даже если устройство уже включено
+          - conditions:
+              - condition: template
+                value_template: "{{ recommended > 0 }}"
+              - condition: template
+                value_template: >
+                  {{ (now() - states.switch.humidifier_puh_9105_puh_2709_power.last_changed).total_seconds() > 1800 }}
             sequence:
               - service: switch.turn_on
                 target:
@@ -475,7 +491,7 @@ automation:
           message: >
             {{ error_message }}
 
-            Текущая влажность: {{ states('sensor.sensor_zap_humidity') }}%
+            Текущая влажность: {{ states('sensor.sensor_eva_humidity') }}%
             Целевая влажность: {{ states('sensor.adaptive_target_humidity') }}%
 
   # ══════════════════════════════════════════════════════════════════════════
@@ -541,8 +557,8 @@ automation:
 #       (автоматически выключается при ручном управлении увлажнителем)
 #
 #  4. МОНИТОРИНГ:
-#     • sensor.sensor_zap_humidity - текущая влажность в комнате
-#     • sensor.sensor_zap_temperature - температура в комнате
+#     • sensor.sensor_eva_humidity - текущая влажность в комнате
+#     • sensor.sensor_eva_temperature - температура в комнате
 #     • weather.forecast_home_assistant - уличная температура (Met.no)
 #     • number.humidifier_puh_9105_puh_2709_intensity - интенсивность (0-7)
 #
