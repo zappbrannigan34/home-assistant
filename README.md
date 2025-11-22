@@ -81,6 +81,153 @@
 
 4. **Перезапустить Home Assistant** или перезагрузить конфигурацию YAML
 
+### 🔧 Настройка Entity IDs
+
+#### Таблица всех используемых Entity IDs
+
+| Entity ID | Тип | Назначение | Где найти |
+|-----------|-----|-----------|-----------|
+| `sensor.sensor_zap_temperature` | Sensor | Температура в комнате для расчета базовой влажности | Developer Tools → States → фильтр "temperature" |
+| `sensor.sensor_zap_humidity` | Sensor | Текущая влажность в комнате | Developer Tools → States → фильтр "humidity" |
+| `weather.forecast_home_assistant` | Weather | Наружная температура для защиты от конденсата | Settings → Integrations → Weather |
+| `number.humidifier_puh_9105_puh_2709_intensity` | Number | Уровень интенсивности увлажнителя (0-7) | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_power` | Switch | Питание увлажнителя | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_sound` | Switch | Звуковые уведомления (OFF в автоматизации) | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_child_lock` | Switch | Блокировка от детей (ON в автоматизации) | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_ioniser` | Switch | Ионизация (ON в автоматизации) | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_warm_stream` | Switch | Подогрев пара (ON в автоматизации) | polaris-mqtt integration |
+| `switch.humidifier_puh_9105_puh_2709_backlight` | Switch | Подсветка дисплея (OFF в автоматизации) | polaris-mqtt integration |
+| `humidifier.humidifier_puh_9105_puh_2709_humidifier` | Humidifier | Основной объект увлажнителя (режим работы) | polaris-mqtt integration |
+| `sensor.humidifier_puh_9105_puh_2709_error` | Sensor | Код ошибки устройства (01-05) | polaris-mqtt integration |
+| `binary_sensor.humidifier_puh_9105_puh_2709_water_tank` | Binary Sensor | Статус бака с водой (ON = снят, OFF = на месте) | polaris-mqtt integration |
+| `notify.zapgroup` | Notify Service | Сервис Telegram уведомлений | Settings → Integrations → Telegram |
+
+#### Как найти свои Entity IDs
+
+**Метод 1: Developer Tools (рекомендуется)**
+1. Откройте Home Assistant
+2. Перейдите в **Developer Tools** → **States**
+3. Используйте фильтр для поиска:
+   - `temperature` - датчики температуры
+   - `humidity` - датчики влажности
+   - `weather` - погодные интеграции
+   - `humidifier` - увлажнители
+4. Скопируйте полные entity_id (например: `sensor.living_room_temperature`)
+
+**Метод 2: Entity Registry (продвинутый)**
+```bash
+# На машине с Home Assistant
+cat /config/.storage/core.entity_registry | jq '.data.entities[] | select(.platform=="polaris_mqtt") | {entity_id, original_name}'
+```
+
+**Метод 3: Визуальный поиск**
+1. Settings → Devices & Services
+2. Найдите вашу интеграцию (polaris-mqtt, Met.no, Telegram)
+3. Кликните на устройство → увидите все entities
+
+#### Массовая замена Entity IDs
+
+**Для Linux/macOS:**
+```bash
+cd /config/packages/humidity
+
+# Резервная копия
+cp humidity_control.yaml humidity_control.yaml.backup
+
+# Замена датчиков комнаты
+sed -i 's/sensor\.sensor_zap_temperature/sensor.YOUR_TEMPERATURE/g' humidity_control.yaml
+sed -i 's/sensor\.sensor_zap_humidity/sensor.YOUR_HUMIDITY/g' humidity_control.yaml
+
+# Замена погоды
+sed -i 's/weather\.forecast_home_assistant/weather.YOUR_WEATHER/g' humidity_control.yaml
+
+# Замена notify
+sed -i 's/notify\.zapgroup/notify.YOUR_NOTIFY/g' humidity_control.yaml
+
+# Замена Polaris (если ID отличается)
+sed -i 's/humidifier_puh_9105_puh_2709/YOUR_HUMIDIFIER_ID/g' humidity_control.yaml
+```
+
+**Для Windows (PowerShell):**
+```powershell
+cd H:\packages\humidity
+
+# Резервная копия
+Copy-Item humidity_control.yaml humidity_control.yaml.backup
+
+# Замена
+(Get-Content humidity_control.yaml) `
+  -replace 'sensor\.sensor_zap_temperature', 'sensor.YOUR_TEMPERATURE' `
+  -replace 'sensor\.sensor_zap_humidity', 'sensor.YOUR_HUMIDITY' `
+  -replace 'weather\.forecast_home_assistant', 'weather.YOUR_WEATHER' `
+  -replace 'notify\.zapgroup', 'notify.YOUR_NOTIFY' `
+  -replace 'humidifier_puh_9105_puh_2709', 'YOUR_HUMIDIFIER_ID' |
+  Set-Content humidity_control.yaml
+```
+
+#### Примеры для разных конфигураций
+
+**Вариант 1: Другая модель Polaris (например PUH-9003)**
+```yaml
+# Ваши entity IDs будут выглядеть так:
+number.humidifier_puh_9003_xxxx_intensity
+switch.humidifier_puh_9003_xxxx_power
+# и т.д.
+
+# Замените через sed/PowerShell:
+# humidifier_puh_9105_puh_2709 → humidifier_puh_9003_xxxx
+```
+
+**Вариант 2: Погода от OpenWeatherMap**
+```yaml
+# Вместо:
+weather.forecast_home_assistant
+
+# Используйте:
+weather.openweathermap  # или weather.home (по умолчанию от OpenWeatherMap)
+```
+
+**Вариант 3: Уведомления через мобильное приложение**
+```yaml
+# Вместо:
+notify.zapgroup
+
+# Используйте:
+notify.mobile_app_iphone  # или ваше устройство
+```
+
+**Вариант 4: Датчики Aqara вместо Tuya**
+```yaml
+# Вместо:
+sensor.sensor_zap_temperature
+sensor.sensor_zap_humidity
+
+# Используйте (примеры):
+sensor.aqara_living_room_temperature
+sensor.aqara_living_room_humidity
+# или
+sensor.0x00158d0001a2b3c4_temperature
+sensor.0x00158d0001a2b3c4_humidity
+```
+
+#### Проверка корректности замены
+
+После замены entity IDs проверьте конфигурацию:
+
+1. **Через Home Assistant UI:**
+   - Developer Tools → YAML → Check Configuration
+   - Должно показать "Configuration valid"
+
+2. **Через командную строку:**
+   ```bash
+   ha core check
+   ```
+
+3. **Тестовый запуск:**
+   - Перезагрузите YAML конфигурацию или перезапустите HA
+   - Включите `input_boolean.humidity_auto_enabled`
+   - Проверьте логи на ошибки: Settings → System → Logs
+
 ### Использование
 
 1. **Включить автоматизацию**: `input_boolean.humidity_auto_enabled` → ON
@@ -141,4 +288,3 @@ home-assistant/
 ## 🤝 Вклад
 
 Автоматизация разработана с помощью [Claude Code](https://claude.com/claude-code).
-
