@@ -186,24 +186,23 @@ automation:
         state: "on"
 
     action:
+      - variables:
+          recommended: "{{ states('sensor.recommended_intensity') | int(0) }}"
+
+      # ВАЖНО: Если recommended=0, НЕ запускать device_setup!
+      # Иначе создаётся цикл: control_main выключает power → device_setup включает обратно
+      - condition: template
+        value_template: "{{ recommended > 0 }}"
+
       # Шаг 0: Выключить manual_control_detector чтобы не сработал во время setup
       - service: automation.turn_off
         target:
           entity_id: automation.humidity_manual_control_detector
 
-      # Шаг 1: Включить питание ТОЛЬКО если нужно увлажнение
-      - choose:
-          - conditions:
-              - condition: template
-                value_template: "{{ states('sensor.recommended_intensity') | int(0) > 0 }}"
-            sequence:
-              - service: switch.turn_on
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_power
-        default:
-          - service: switch.turn_off
-            target:
-              entity_id: switch.humidifier_puh_9105_puh_2709_power
+      # Шаг 1: Включить питание
+      - service: switch.turn_on
+        target:
+          entity_id: switch.humidifier_puh_9105_puh_2709_power
 
       # Шаг 2: Подождать загрузки устройства
       - delay:
@@ -292,34 +291,10 @@ automation:
           current: "{{ states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) }}"
 
       # ────────────────────────────────────────────────────────────────────────
-      # ПРОВЕРКА ГОТОВНОСТИ УСТРОЙСТВА
-      # ────────────────────────────────────────────────────────────────────────
-      # Если устройство НЕ готово → остановиться и ждать device_setup automation
-      - choose:
-          # Если power OFF или режим неправильный → остановиться
-          - conditions:
-              - condition: or
-                conditions:
-                  - condition: state
-                    entity_id: switch.humidifier_puh_9105_puh_2709_power
-                    state: "off"
-                  - condition: template
-                    value_template: >
-                      {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
-            sequence:
-              - stop: "Устройство не готово, ждём device_setup automation"
-
-          # Если бак снят/пуст → только остановиться (уведомление отправит water_empty)
-          - conditions:
-              - condition: state
-                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
-                state: "on"
-            sequence:
-              - stop: "Нет воды в баке"
-
-      # ────────────────────────────────────────────────────────────────────────
       # УПРАВЛЕНИЕ ПИТАНИЕМ (в зависимости от recommended)
       # ────────────────────────────────────────────────────────────────────────
+      # ВАЖНО: Эта секция ДОЛЖНА быть ПЕРЕД проверкой готовности!
+      # Иначе если power=off, automation остановится и не сможет включить power.
       - choose:
           # Если recommended = 0 → ВЫКЛЮЧИТЬ питание
           - conditions:
@@ -345,6 +320,33 @@ automation:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
               - delay:
                   seconds: 2  # Ждём загрузки устройства
+
+      # ────────────────────────────────────────────────────────────────────────
+      # ПРОВЕРКА ГОТОВНОСТИ УСТРОЙСТВА
+      # ────────────────────────────────────────────────────────────────────────
+      # Если устройство НЕ готово → остановиться
+      # NOTE: После управления питанием - если power всё ещё off, значит recommended=0
+      - choose:
+          # Если power OFF или режим неправильный → остановиться
+          - conditions:
+              - condition: or
+                conditions:
+                  - condition: state
+                    entity_id: switch.humidifier_puh_9105_puh_2709_power
+                    state: "off"
+                  - condition: template
+                    value_template: >
+                      {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
+            sequence:
+              - stop: "Устройство выключено (recommended=0) или режим неправильный"
+
+          # Если бак снят/пуст → только остановиться (уведомление отправит water_empty)
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
+                state: "on"
+            sequence:
+              - stop: "Нет воды в баке"
 
       # ────────────────────────────────────────────────────────────────────────
       # УПРАВЛЕНИЕ ИНТЕНСИВНОСТЬЮ (если устройство готово)
