@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 #  АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ УВЛАЖНИТЕЛЕМ POLARIS PUH-9105
 #
-#  Version: 1.0.0
+#  Version: 1.1.0
 #  Last Updated: 2025-01-22
 # ═══════════════════════════════════════════════════════════════════════════════
 #
@@ -402,6 +402,48 @@ automation:
 
             Текущая влажность: {{ states('sensor.sensor_zap_humidity') }}%
             Целевая влажность: {{ states('sensor.adaptive_target_humidity') }}%
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  ВОССТАНОВЛЕНИЕ ПОСЛЕ RELOAD/RESTART
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: humidity_reload_recovery
+    alias: "Восстановление после reload/restart"
+    description: "Инициализация устройства при reload/restart если автоматизация включена"
+    mode: single
+
+    trigger:
+      # При reload automations
+      - platform: event
+        event_type: automation_reloaded
+      # При HA restart
+      - platform: homeassistant
+        event: start
+
+    condition:
+      # Только если helper включён
+      - condition: state
+        entity_id: input_boolean.humidity_auto_enabled
+        state: "on"
+      # И устройство не готово
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: switch.humidifier_puh_9105_puh_2709_power
+            state: "off"
+          - condition: template
+            value_template: >
+              {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
+
+    action:
+      # Задержка чтобы все entities загрузились
+      - delay:
+          seconds: 5
+      # Запустить device setup
+      - service: automation.trigger
+        target:
+          entity_id: automation.humidity_device_setup
+        data:
+          skip_condition: true
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  📋 ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ
