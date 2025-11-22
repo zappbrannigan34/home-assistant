@@ -235,11 +235,14 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
 
 ## История изменений
 
-- **2025-11-22 (v3)**: ФИНАЛЬНОЕ исправление - device_setup теперь временно выключает detector:
-  - manual_control_detector: добавлена проверка value change, но state trigger срабатывал на MQTT updates без value change
-  - device_setup: добавлено automation.turn_off detector в начале, automation.turn_on detector через 5 sec в конце
+- **2025-11-22 (v4)**: РЕАЛЬНО ФИНАЛЬНОЕ исправление - увеличен delay до 20 sec:
+  - device_setup: delay увеличен с 5 до 20 секунд (MQTT updates приходили до 14+ секунд)
+  - Tested: helper остаётся включенным 100+ секунд ✅
+  - Проблема была: v3 работала но delay 5 sec был недостаточен для Polaris PUH-9105
+- **2025-11-22 (v3)**: device_setup теперь временно выключает detector:
+  - device_setup: добавлено automation.turn_off detector в начале, automation.turn_on detector через delay в конце
   - Это полностью защищает от ложных срабатываний detector во время device setup
-  - Helper теперь ОСТАЁТСЯ включенным при ручном включении и при reload/restart ✅
+  - Частично работало, но delay 5 sec был недостаточен
 - **2025-11-22 (v2)**: Исправлена логика manual_control_detector и reload_recovery:
   - manual_control_detector: убран trigger на power, добавлен for: 2sec, изменены conditions (проверка current вместо parent_id)
   - reload_recovery: убрано condition helper="on", добавлено включение helper в action

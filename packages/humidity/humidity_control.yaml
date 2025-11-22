@@ -230,9 +230,9 @@ automation:
         target:
           entity_id: switch.humidifier_puh_9105_puh_2709_backlight
 
-      # Шаг 5: Подождать чтобы все MQTT updates пришли
+      # Шаг 5: Подождать чтобы все MQTT updates пришли и устройство стабилизировалось
       - delay:
-          seconds: 5
+          seconds: 20
 
       # Шаг 6: Включить manual_control_detector обратно
       - service: automation.turn_on
