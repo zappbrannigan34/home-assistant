@@ -143,11 +143,14 @@ template:
             {% elif error > 0.5 %}
               {# Чуть ниже цели → увеличить на 1 (макс 7) #}
               {{ [current_intensity + 1, 7] | min }}
+            {% elif error < -0.5 %}
+              {# Превышение цели → ВЫКЛЮЧИТЬ (0) #}
+              0
             {% elif error < -2 %}
-              {# Превышение → снизить на 1 (мин 0) #}
+              {# Сильное превышение → снизить на 1 (мин 0) #}
               {{ [current_intensity - 1, 0] | max }}
             {% else %}
-              {# В пределах целевого диапазона → не менять #}
+              {# В пределах целевого диапазона (-0.5 до +0.5) → не менять #}
               {{ current_intensity }}
             {% endif %}
 
@@ -188,10 +191,19 @@ automation:
         target:
           entity_id: automation.humidity_manual_control_detector
 
-      # Шаг 1: Включить питание
-      - service: switch.turn_on
-        target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_power
+      # Шаг 1: Включить питание ТОЛЬКО если нужно увлажнение
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ states('sensor.recommended_intensity') | int(0) > 0 }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+        default:
+          - service: switch.turn_off
+            target:
+              entity_id: switch.humidifier_puh_9105_puh_2709_power
 
       # Шаг 2: Подождать загрузки устройства
       - delay:
@@ -304,6 +316,35 @@ automation:
                 state: "on"
             sequence:
               - stop: "Нет воды в баке"
+
+      # ────────────────────────────────────────────────────────────────────────
+      # УПРАВЛЕНИЕ ПИТАНИЕМ (в зависимости от recommended)
+      # ────────────────────────────────────────────────────────────────────────
+      - choose:
+          # Если recommended = 0 → ВЫКЛЮЧИТЬ питание
+          - conditions:
+              - condition: template
+                value_template: "{{ recommended == 0 }}"
+              - condition: state
+                entity_id: switch.humidifier_puh_9105_puh_2709_power
+                state: "on"
+            sequence:
+              - service: switch.turn_off
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+          # Если recommended > 0 И power OFF → ВКЛЮЧИТЬ питание
+          - conditions:
+              - condition: template
+                value_template: "{{ recommended > 0 }}"
+              - condition: state
+                entity_id: switch.humidifier_puh_9105_puh_2709_power
+                state: "off"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+              - delay:
+                  seconds: 2  # Ждём загрузки устройства
 
       # ────────────────────────────────────────────────────────────────────────
       # УПРАВЛЕНИЕ ИНТЕНСИВНОСТЬЮ (если устройство готово)
