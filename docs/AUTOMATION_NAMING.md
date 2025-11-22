@@ -235,6 +235,13 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
 
 ## История изменений
 
+- **2025-11-22 (v7 - ФИНАЛЬНОЕ РЕШЕНИЕ)**: Исправлена логика порядка секций и device_setup trigger:
+  - control_main: УПРАВЛЕНИЕ ПИТАНИЕМ перемещено ПЕРЕД ПРОВЕРКОЙ ГОТОВНОСТИ
+  - Проблема v6: если power=off, ПРОВЕРКА ГОТОВНОСТИ останавливала automation → УПРАВЛЕНИЕ ПИТАНИЕМ не выполнялось → logic deadlock
+  - device_setup: добавлена condition `recommended > 0` в начале action
+  - Проблема v6: device_setup триггерился когда control_main выключал power (trigger: power→off for 5 sec) и включал power обратно → бесконечный цикл
+  - Новая логика: device_setup останавливается если recommended=0, НЕ трогает power
+  - Tested: при error=-1.9% power выключается И ОСТАЁТСЯ OFF (device_setup не перезапускает) ✅✅✅
 - **2025-11-22 (v6)**: Исправлена логика управления при переувлажнении:
   - recommended_intensity: ИСПРАВЛЕН порядок elif (было: error<-0.5 перед error<-2, теперь: error<-2 перед error<-0.5)
   - recommended_intensity логика: error<-2 → decrement, -2<error<-0.5 → 0, -0.5<error<0.5 → maintain
@@ -242,6 +249,7 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
   - device_setup: добавлена условная проверка recommended перед включением питания
   - Проблема v5: при error=-1.9% увлажнитель оставался включённым (питание ON, intensity 0)
   - Tested: при error=-1.9% питание автоматически выключается ✅
+  - **НО:** Обнаружен infinite loop: control_main выключает power → device_setup включает обратно
 - **2025-11-22 (v5)**: ФИНАЛЬНОЕ ФИНАЛЬНОЕ исправление - защита detector также для control_main:
   - control_main ТОЖЕ вызывает service calls → MQTT updates → detector triggers!
   - Добавлена защита: control_main выключает detector перед number.set_value, delay 20 sec, включает обратно
