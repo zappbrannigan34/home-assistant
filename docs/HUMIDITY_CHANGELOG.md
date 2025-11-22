@@ -1,0 +1,200 @@
+# Humidity Control Automation - Changelog
+
+История изменений автоматизации управления увлажнителем.
+
+**Repository:** https://github.com/zappbrannigan34/home-assistant.git
+**File:** `packages/humidity/humidity_control.yaml`
+
+---
+
+## v7 - ФИНАЛЬНОЕ РЕШЕНИЕ (2025-11-22)
+
+**Commit:** 33fd799
+
+### Исправления:
+
+**1. Logic Deadlock в control_main:**
+- **Проблема:** ПРОВЕРКА ГОТОВНОСТИ была ПЕРЕД УПРАВЛЕНИЕМ ПИТАНИЕМ
+- Если power=off, automation останавливалась → УПРАВЛЕНИЕ ПИТАНИЕМ не выполнялось
+- **Fix:** УПРАВЛЕНИЕ ПИТАНИЕМ перемещено ПЕРЕД ПРОВЕРКОЙ ГОТОВНОСТИ
+- Теперь automation сначала решает включить/выключить power, затем проверяет готовность
+
+**2. device_setup Infinite Loop:**
+- **Проблема:** device_setup триггерился когда `power → off for 5 sec`
+- Всегда включал power обратно, даже когда `recommended=0`
+- Создавал цикл: control_main выключает → device_setup включает → control_main выключает...
+- **Fix:** Добавлена condition `recommended > 0` в начало action
+- Теперь device_setup останавливается если recommended=0, НЕ трогает power
+
+### Тесты:
+- ✅ При error=-1.9% power выключается И ОСТАЁТСЯ OFF
+- ✅ device_setup не перезапускает power когда recommended=0
+- ✅ Влажность снижается (error: -1.9% → -0.9%)
+
+---
+
+## v6 (corrected) - Fix elif order (2025-11-22)
+
+**Commit:** 6959277
+
+### Исправления:
+
+**recommended_intensity elif order bug:**
+- **Проблема:** `elif error < -0.5` было ПЕРЕД `elif error < -2`
+- Condition `error < -2` была UNREACHABLE (dead code)
+- **Fix:** Поменял порядок - сначала `error < -2`, потом `error < -0.5`
+
+**Правильная логика:**
+```yaml
+elif error > 0.5:     # → increment
+elif error < -2:      # → decrement (check larger threshold first!)
+elif error < -0.5:    # → 0 (then smaller threshold)
+else:                 # → maintain
+```
+
+### Тесты:
+- ✅ При error=-1.9% recommended корректно становится 0
+
+### Проблема v6:
+- Обнаружен infinite loop: control_main выключает power → device_setup включает обратно
+- Исправлено в v7
+
+---
+
+## v6 - Power Management (2025-11-22)
+
+**Commit:** e42bb9a
+
+### Новая функциональность:
+
+**1. Power management в control_main:**
+- Добавлена секция "УПРАВЛЕНИЕ ПИТАНИЕМ"
+- Если `recommended=0` И `power=on` → выключить power
+- Если `recommended>0` И `power=off` → включить power
+
+**2. Conditional power в device_setup:**
+- device_setup теперь проверяет recommended перед включением
+- Если `recommended>0` → включить power
+- Иначе → выключить power
+
+**3. Исправлен порядок elif в recommended_intensity:**
+- Логика: error<-2 → decrement, -2<error<-0.5 → 0, -0.5<error<0.5 → maintain
+
+### Тесты:
+- ✅ При error=-1.9% питание автоматически выключается
+
+### Проблема v5:
+- При error=-1.9% увлажнитель оставался включённым (питание ON, intensity 0)
+- Исправлено в v6
+
+---
+
+## v5 - Detector Protection для control_main (2025-11-22)
+
+**Commit:** dc269bb
+
+### Исправления:
+
+**control_main MQTT echo protection:**
+- **Проблема:** control_main вызывает service calls → MQTT updates → detector triggers!
+- **Fix:** control_main теперь временно выключает detector:
+  1. `automation.turn_off` detector
+  2. `number.set_value` (change intensity)
+  3. `delay: 20 sec` (wait for MQTT)
+  4. `automation.turn_on` detector
+
+### Тесты:
+- ✅ Helper остаётся ON 3+ минуты ДАЖЕ когда control_main срабатывает!
+
+### Проблема v4:
+- device_setup была защищена, но control_main НЕ была защищена
+- Исправлено в v5
+
+---
+
+## v4 - Увеличен delay до 20 sec (2025-11-22)
+
+**Commit:** 90c7208
+
+### Исправления:
+
+**device_setup delay increase:**
+- **Проблема:** MQTT updates приходили до 14+ секунд
+- Delay 5 секунд был недостаточен
+- **Fix:** Увеличен delay с 5 до 20 секунд
+
+### Проблема v3:
+- Delay 5 sec был недостаточен для MQTT updates
+- Частично работало, но control_main не была защищена
+
+---
+
+## v3 - device_setup detector protection (2025-11-22)
+
+**Commit:** eb2c61e
+
+### Исправления:
+
+**device_setup MQTT echo protection:**
+- **Проблема:** device_setup меняет intensity → MQTT echoes → detector triggers
+- **Fix:** device_setup теперь временно выключает detector:
+  1. `automation.turn_off` detector в начале
+  2. All service calls
+  3. `delay: 5 sec`
+  4. `automation.turn_on` detector в конце
+
+### Проблема v2:
+- detector всё равно срабатывал на MQTT echoes
+- Delay 5 sec был недостаточен
+
+---
+
+## v2 - Detector logic fixes (2025-11-22)
+
+### Исправления:
+
+**manual_control_detector:**
+- Убран trigger на power
+- Добавлен `for: 2 sec`
+- Изменены conditions (проверка `current` вместо `parent_id`)
+
+**reload_recovery:**
+- Убрано condition `helper="on"`
+- Добавлено включение helper в action
+
+### Проблема v1:
+- detector всё равно срабатывал на MQTT echoes
+
+---
+
+## v1 - KVAZIS Pattern (2025-11-22)
+
+### Изменения:
+
+**Automation naming:**
+- Применён kvazis pattern для всех 5 automations:
+  - `id`: Описательное имя для ЛЮДЕЙ (русский язык)
+  - `alias`: Технический код для entity_id (английский, [a-z0-9_])
+
+**Примеры:**
+```yaml
+- id: "Инициализация увлажнителя"
+  alias: humidity_device_setup
+  # → automation.humidity_device_setup
+
+- id: "Управление интенсивностью увлажнителя"
+  alias: humidity_control_main
+  # → automation.humidity_control_main
+```
+
+---
+
+## Initial Implementation (2025-01-22)
+
+Создан файл `AUTOMATION_NAMING.md` после ЧЕТВЁРТОГО раза забывания правил именования automations 🤦
+
+**Документированы:**
+- entity_id generation rules (slugify)
+- Доступные поля (id, alias, description)
+- kvazis pattern best practices
+- Проверка entity_id через API
