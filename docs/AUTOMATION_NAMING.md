@@ -235,9 +235,14 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
 
 ## История изменений
 
+- **2025-11-22 (v3)**: ФИНАЛЬНОЕ исправление - device_setup теперь временно выключает detector:
+  - manual_control_detector: добавлена проверка value change, но state trigger срабатывал на MQTT updates без value change
+  - device_setup: добавлено automation.turn_off detector в начале, automation.turn_on detector через 5 sec в конце
+  - Это полностью защищает от ложных срабатываний detector во время device setup
+  - Helper теперь ОСТАЁТСЯ включенным при ручном включении и при reload/restart ✅
 - **2025-11-22 (v2)**: Исправлена логика manual_control_detector и reload_recovery:
   - manual_control_detector: убран trigger на power, добавлен for: 2sec, изменены conditions (проверка current вместо parent_id)
   - reload_recovery: убрано condition helper="on", добавлено включение helper в action
-  - Теперь helper корректно включается вручную и при reload/restart
+  - Частично работало, но detector всё равно срабатывал на MQTT echoes
 - **2025-11-22**: Добавлен раздел "KVAZIS PATTERN". Обновлены все 5 automations в humidity_control.yaml по паттерну kvazis (id для описания, alias для entity_id)
 - **2025-01-22**: Создан после ЧЕТВЁРТОГО раза забывания этих правил 🤦
