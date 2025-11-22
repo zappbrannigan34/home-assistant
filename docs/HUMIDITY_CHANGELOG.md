@@ -7,6 +7,68 @@
 
 ---
 
+## v8 - FIX INCREMENTAL RUNAWAY (2025-11-22)
+
+**Commit:** [pending]
+**Version:** 1.1.2
+
+### Исправления:
+
+**Incremental Logic Runaway Bug:**
+- **Проблема:** Диапазон 0.5-2% использовал `current + 1` на КАЖДОМ цикле (5 мин)
+- За 6 циклов достигал max=7 даже при error=1.5%!
+- Intensity НЕ снижалась когда error падал с 2% к 0.5%
+- **Root cause:** Incremental control применялся ВНЕ deadband (должен быть ТОЛЬКО внутри)
+
+**Старая логика (баг):**
+```yaml
+error > 2   → 3 (zoned)
+error > 0.5 → current + 1 (incremental) ← RUNAWAY!
+-0.5 to 0.5 → maintain (deadband)
+```
+
+**Новая логика (fix):**
+```yaml
+error > 2   → 3 (zoned)
+error > 1   → 2 (zoned, NEW)
+error > 0.5 → 1 (zoned, NEW)
+-0.5 to 0.5 → maintain (deadband)
+error < -0.5 → 0 (turn off)
+error < -2  → current - 1 (incremental decrement)
+```
+
+**Rationale:**
+- Диапазон 0.5-2% - это ВСЁ ЕЩЁ средняя ошибка, НЕ "точная настройка"
+- Incremental control нужен ТОЛЬКО для fine-tuning в deadband или при переувлажнении
+- Zoned approach для 0.5-2% даёт предсказуемое поведение
+
+### Production Testing (2025-11-22 12:49-12:58 UTC):
+
+**Scenario 1: Small error (0.5-1%):**
+- ✅ BEFORE: error=1.65% → recommended=7 (WRONG, runaway)
+- ✅ AFTER: error=0.5% → recommended=1 (CORRECT)
+- ✅ Intensity НЕ растёт, остаётся на 1
+
+**Scenario 2: Approach to target:**
+- ✅ Error: 0.5% → 0.2% → 0.1% → 0.0%
+- ✅ Recommended: стабильно 1 (НЕТ runaway)
+- ✅ Current: 39.84% → 40.25% (плавное приближение к target 40.3%)
+
+**Scenario 3: Overshoot (переувлажнение):**
+- ✅ Error: -0.1% → -0.4% → -0.5% → -0.6%
+- ✅ Recommended: 1 → 0 (при error < -0.5)
+- ✅ Power: ON → OFF (12:55:48)
+- ✅ Power ОСТАЁТСЯ OFF (v7 fix сохранён, нет infinite loop)
+
+### Files Changed:
+- `packages/humidity/humidity_control.yaml` (lines 4, 137-158)
+
+### Проблема v7:
+- Incremental runaway при error 0.5-2% (не было обнаружено до production testing)
+- Исправлено в v8
+
+---
+
 ## v7 - ФИНАЛЬНОЕ РЕШЕНИЕ (2025-11-22)
 
 **Commit:** 33fd799
