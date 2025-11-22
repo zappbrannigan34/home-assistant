@@ -282,9 +282,31 @@ automation:
                     value_template: >
                       {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
             sequence:
-              - service: automation.trigger
+              - service: switch.turn_on
                 target:
-                  entity_id: automation.humidity_device_setup
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+              - delay:
+                  seconds: 2
+              - service: humidifier.set_mode
+                target:
+                  entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+                data:
+                  mode: "home"
+              - service: switch.turn_off
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_sound
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_ioniser
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_warm_stream
+              - service: switch.turn_off
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_backlight
               - stop: "Устройство инициализируется"
 
           # Если бак снят/пуст → только остановиться (уведомление отправит water_empty)
