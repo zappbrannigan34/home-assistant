@@ -269,9 +269,9 @@ automation:
       # ────────────────────────────────────────────────────────────────────────
       # ПРОВЕРКА ГОТОВНОСТИ УСТРОЙСТВА
       # ────────────────────────────────────────────────────────────────────────
-      # Если устройство НЕ готово → вызвать setup automation и остановиться
+      # Если устройство НЕ готово → остановиться и ждать device_setup automation
       - choose:
-          # Если power OFF или режим неправильный → запустить setup
+          # Если power OFF или режим неправильный → остановиться
           - conditions:
               - condition: or
                 conditions:
@@ -282,32 +282,7 @@ automation:
                     value_template: >
                       {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
             sequence:
-              - service: switch.turn_on
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_power
-              - delay:
-                  seconds: 2
-              - service: humidifier.set_mode
-                target:
-                  entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
-                data:
-                  mode: "home"
-              - service: switch.turn_off
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_sound
-              - service: switch.turn_on
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
-              - service: switch.turn_on
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_ioniser
-              - service: switch.turn_on
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_warm_stream
-              - service: switch.turn_off
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_backlight
-              - stop: "Устройство инициализируется"
+              - stop: "Устройство не готово, ждём device_setup automation"
 
           # Если бак снят/пуст → только остановиться (уведомление отправит water_empty)
           - conditions:
@@ -346,10 +321,6 @@ automation:
       - platform: state
         entity_id: switch.humidifier_puh_9105_puh_2709_power
         to: "off"
-      # Ручное изменение режима
-      - platform: state
-        entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
-        attribute: mode
 
     condition:
       # Изменение НЕ от автоматизации (любой источник: MQTT, UI, приложение)
