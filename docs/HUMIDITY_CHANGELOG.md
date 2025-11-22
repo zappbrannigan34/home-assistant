@@ -9,7 +9,7 @@
 
 ## v8 - FIX INCREMENTAL RUNAWAY (2025-11-22)
 
-**Commit:** [pending]
+**Commit:** 41b2e7b
 **Version:** 1.1.2
 
 ### Исправления:
