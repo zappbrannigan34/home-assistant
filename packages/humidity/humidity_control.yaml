@@ -303,20 +303,18 @@ automation:
           - conditions:
               - condition: template
                 value_template: "{{ recommended == 0 }}"
-              - condition: state
-                entity_id: switch.humidifier_puh_9105_puh_2709_power
-                state: "on"
+              - condition: template
+                value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') == 'on' }}"
             sequence:
               - service: switch.turn_off
                 target:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
-          # Если recommended > 0 И power OFF → ВКЛЮЧИТЬ питание
+          # Если recommended > 0 И power НЕ ON (off/unknown/unavailable) → ВКЛЮЧИТЬ питание
           - conditions:
               - condition: template
                 value_template: "{{ recommended > 0 }}"
-              - condition: state
-                entity_id: switch.humidifier_puh_9105_puh_2709_power
-                state: "off"
+              - condition: template
+                value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') != 'on' }}"
             sequence:
               - service: switch.turn_on
                 target:
