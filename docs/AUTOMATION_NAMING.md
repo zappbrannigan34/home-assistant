@@ -236,11 +236,12 @@ grep -A2 '"entity_id":"automation\.' H:/.storage/core.entity_registry
 ## История изменений
 
 - **2025-11-22 (v6)**: Исправлена логика управления при переувлажнении:
-  - recommended_intensity: добавлено правило `elif error < -0.5: 0` (при превышении цели → выключить)
+  - recommended_intensity: ИСПРАВЛЕН порядок elif (было: error<-0.5 перед error<-2, теперь: error<-2 перед error<-0.5)
+  - recommended_intensity логика: error<-2 → decrement, -2<error<-0.5 → 0, -0.5<error<0.5 → maintain
   - control_main: добавлено управление питанием (если recommended=0 → power OFF, если recommended>0 И power OFF → power ON)
   - device_setup: добавлена условная проверка recommended перед включением питания
   - Проблема v5: при error=-1.9% увлажнитель оставался включённым (питание ON, intensity 0)
-  - Tested: при error < -0.5 питание автоматически выключается ✅
+  - Tested: при error=-1.9% питание автоматически выключается ✅
 - **2025-11-22 (v5)**: ФИНАЛЬНОЕ ФИНАЛЬНОЕ исправление - защита detector также для control_main:
   - control_main ТОЖЕ вызывает service calls → MQTT updates → detector triggers!
   - Добавлена защита: control_main выключает detector перед number.set_value, delay 20 sec, включает обратно
