@@ -159,8 +159,8 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВА
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_device_setup
-    alias: "Инициализация увлажнителя"
+  - id: "Инициализация увлажнителя"
+    alias: humidity_device_setup
     description: "Включение и настройка всех параметров устройства"
     mode: single
     max_exceeded: silent
@@ -228,8 +228,8 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  ОСНОВНАЯ АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_control_main
-    alias: "Управление интенсивностью увлажнителя"
+  - id: "Управление интенсивностью увлажнителя"
+    alias: humidity_control_main
     description: "Hybrid adaptive control: комнатная + уличная температура"
     mode: single
     max_exceeded: silent
@@ -307,8 +307,8 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  ДЕТЕКТОР РУЧНОГО УПРАВЛЕНИЯ
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_manual_control_detector
-    alias: "Детектор ручного управления увлажнителем"
+  - id: "Детектор ручного управления увлажнителем"
+    alias: humidity_manual_control_detector
     description: "Останавливает автоматизацию при изменении НЕ от неё"
     mode: restart
 
@@ -316,16 +316,19 @@ automation:
       # Ручное изменение интенсивности
       - platform: state
         entity_id: number.humidifier_puh_9105_puh_2709_intensity
-      # Ручное выключение питания
-      - platform: state
-        entity_id: switch.humidifier_puh_9105_puh_2709_power
-        to: "off"
+        for:
+          seconds: 2
 
     condition:
-      # Изменение НЕ от автоматизации (любой источник: MQTT, UI, приложение)
+      # Игнорировать инициализацию entity (unavailable/unknown → число)
       - condition: template
         value_template: >
-          {{ trigger.to_state.context.parent_id is none }}
+          {{ trigger.from_state.state not in ['unavailable', 'unknown', 'none'] }}
+      # НЕ срабатывать если device_setup или control_main работают СЕЙЧАС
+      - condition: template
+        value_template: >
+          {{ state_attr('automation.humidity_device_setup', 'current') | int(0) == 0 and
+             state_attr('automation.humidity_control_main', 'current') | int(0) == 0 }}
 
     action:
       # Выключить автоматизацию
@@ -336,8 +339,8 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  УВЕДОМЛЕНИЕ: ОШИБКА УСТРОЙСТВА
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_device_error
-    alias: "Ошибка увлажнителя"
+  - id: "Ошибка увлажнителя"
+    alias: humidity_device_error
     description: "Уведомление при возникновении ошибки устройства"
     mode: single
 
@@ -402,8 +405,8 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  ВОССТАНОВЛЕНИЕ ПОСЛЕ RELOAD/RESTART
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_reload_recovery
-    alias: "Восстановление после reload/restart"
+  - id: "Восстановление после reload/restart"
+    alias: humidity_reload_recovery
     description: "Инициализация устройства при reload/restart если автоматизация включена"
     mode: single
 
@@ -416,11 +419,7 @@ automation:
         event: start
 
     condition:
-      # Только если helper включён
-      - condition: state
-        entity_id: input_boolean.humidity_auto_enabled
-        state: "on"
-      # И устройство не готово
+      # Устройство не готово
       - condition: or
         conditions:
           - condition: state
@@ -434,10 +433,13 @@ automation:
       # Задержка чтобы все entities загрузились
       - delay:
           seconds: 5
-      # Проверить ещё раз что helper всё ещё включён (защита от выключения во время delay)
-      - condition: state
-        entity_id: input_boolean.humidity_auto_enabled
-        state: "on"
+      # Включить helper
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.humidity_auto_enabled
+      # Подождать чтобы helper точно включился
+      - delay:
+          seconds: 1
       # Запустить device setup
       - service: automation.trigger
         target:
