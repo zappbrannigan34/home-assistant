@@ -1,40 +1,6 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-#  АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ УВЛАЖНИТЕЛЕМ POLARIS PUH-9105
-#
-#  Version: 1.2.0
-#  Last Updated: 2025-11-23
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-#  🧪 НАУЧНО ОБОСНОВАННАЯ СИСТЕМА УПРАВЛЕНИЯ ВЛАЖНОСТЬЮ
-#
-#  Методология:
-#    ✓ Hybrid Control: Zoned (kvazis) + Incremental (Stack Overflow)
-#    ✓ Adaptive Humidity: двойная зависимость (комнатная + уличная температура)
-#    ✓ 8 уровней интенсивности (0-7) с плавными переходами
-#
-#  Научная база:
-#    • ВОЗ/WHO: 40-60% для здоровья и минимизации вирусов/бактерий
-#    • ASHRAE Standard 55-2023: тепловой комфорт и точка росы ≤16.8°C
-#    • ISO 7730 (ГОСТ Р ИСО 7730-2009): индекс PMV/PPD Фангера
-#    • ГОСТ 30494-2011: 30-45% оптимум при 20-22°C
-#
-#  Формулы:
-#    1. От комнатной T: base = 75 - (1.25 × T_room) [ISO 7730]
-#    2. От уличной T: limit = 50 - max(0, 10 - T_outdoor) [ASHRAE]
-#    3. Финальная: target = min(base, limit, 60) [ВОЗ максимум]
-#
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  INPUT HELPERS
-# ──────────────────────────────────────────────────────────────────────────────
-
-input_boolean:
-  # Включение/выключение автоматизации
-  humidity_auto_enabled:
-    name: "Автоматизация влажности"
-    initial: true
-    icon: mdi:robot
+# package: puh_9105_humidity
+# Version: 2.0.1
+# Last Updated: 2025-11-24
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
@@ -42,120 +8,86 @@ input_boolean:
 
 template:
   - sensor:
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  АДАПТИВНАЯ ЦЕЛЕВАЯ ВЛАЖНОСТЬ (двойная зависимость)
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # АДАПТИВНАЯ ЦЕЛЕВАЯ ВЛАЖНОСТЬ (ВОЗ + температуры)
       - name: "Adaptive Target Humidity"
+        unique_id: adaptive_target_humidity
         unit_of_measurement: "%"
         state_class: measurement
         icon: mdi:water-thermometer-outline
         state: >
-            {# Температура в комнате (от датчика sensor-eva) #}
-            {% set T_room = states('sensor.sensor_eva_temperature') | float(22) %}
+          {# Температура в комнате #}
+          {% set T_room = states('sensor.sensor_eva_temperature') | float(22) %}
+          {# Температура на улице (Met.no / другая weather-интеграция) #}
+          {% set T_outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
 
-            {# Температура на улице (Met.no weather integration) #}
-            {% set T_outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+          {# Базовая цель от комнатной температуры (комфортный диапазон) #}
+          {% set base_indoor = 75 - (1.25 * T_room) %}
+          {# Ограничение от уличной температуры (ASHRAE/REHVA/Aprilaire-подход) #}
+          {% set outdoor_limit = 50 - [0, 10 - T_outdoor] | max %}
 
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {# ФОРМУЛА 1: Базовая цель от КОМНАТНОЙ температуры              #}
-            {# Источник: ISO 7730 (тепловой комфорт Фангера)                 #}
-            {# Логика: при T↑ → RH↓ (высокая влажность + жара = духота)     #}
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {% set base_indoor = 75 - (1.25 * T_room) %}
+          {# Итог: минимум из indoor/outdoor/максимума 60% #}
+          {% set target = [base_indoor, outdoor_limit, 60] | min | float %}
+          {# Жёсткие медицинские границы ВОЗ: 40–60% #}
+          {% set target = [target, 40] | max %}
 
-            {# Примеры:                                                        #}
-            {# T_room=18°C → 75-22.5 = 52.5%                                  #}
-            {# T_room=20°C → 75-25.0 = 50.0%                                  #}
-            {# T_room=22°C → 75-27.5 = 47.5%                                  #}
-            {# T_room=24°C → 75-30.0 = 45.0%                                  #}
-            {# T_room=26°C → 75-32.5 = 42.5%                                  #}
+          {{ target | round(1) }}
 
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {# ФОРМУЛА 2: Ограничение от УЛИЧНОЙ температуры                 #}
-            {# Источник: ASHRAE/Aprilaire guidelines                          #}
-            {# Логика: холодный воздух при нагреве теряет RH → нужно меньше  #}
-            {#         увлажнение, иначе конденсат на холодных поверхностях  #}
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {% set outdoor_limit = 50 - [0, 10 - T_outdoor] | max %}
-
-            {# Примеры (ASHRAE рекомендации):                                 #}
-            {# T_outdoor > +10°C  → 50 - 0   = 50%                            #}
-            {# T_outdoor = +5°C   → 50 - 5   = 45%                            #}
-            {# T_outdoor = 0°C    → 50 - 10  = 40%                            #}
-            {# T_outdoor = -10°C  → 50 - 20  = 30%                            #}
-            {# T_outdoor = -20°C  → 50 - 30  = 20%                            #}
-            {# T_outdoor = -30°C  → 50 - 40  = 10% (но мин. 15% от ВОЗ)      #}
-
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {# ФИНАЛЬНЫЙ РАСЧЕТ: берём минимум из всех ограничений            #}
-            {# + медицинские границы от ВОЗ: 40-60%                           #}
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {% set target = [base_indoor, outdoor_limit, 60] | min | float %}
-            {% set target = [target, 40] | max %}  {# Минимум 40% (ВОЗ) #}
-
-            {{ target | round(1) }}
-
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  ТЕКУЩЕЕ ОТКЛОНЕНИЕ (ошибка регулирования)
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # ТЕКУЩЕЕ ОТКЛОНЕНИЕ (ошибка регулирования)
       - name: "Humidity Error"
+        unique_id: humidity_error
         unit_of_measurement: "%"
         state_class: measurement
         icon: mdi:delta
         state: >
-            {% set target = states('sensor.adaptive_target_humidity') | float(45) %}
-            {% set current = states('sensor.sensor_eva_humidity') | float(50) %}
-            {{ (target - current) | round(1) }}
+          {% set target = states('sensor.adaptive_target_humidity') | float(45) %}
+          {% set current = states('sensor.sensor_eva_humidity') | float(50) %}
+          {{ (target - current) | round(1) }}
 
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      #  РЕКОМЕНДУЕМАЯ ИНТЕНСИВНОСТЬ (HYBRID метод)
-      # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      # РЕКОМЕНДУЕМАЯ ИНТЕНСИВНОСТЬ (HYBRID + гистерезис ±1%)
       - name: "Recommended Intensity"
+        unique_id: humidity_recommended_intensity
         icon: mdi:gauge
         state: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {% set current_intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
+          {% set error = states('sensor.humidity_error') | float(0) %}
+          {% set current_intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
 
-            {# ═══════════════════════════════════════════════════════════════ #}
-            {# HYBRID CONTROL LOGIC                                            #}
-            {# ═══════════════════════════════════════════════════════════════ #}
+          {# Крупные положительные ошибки: быстрый выход на верхние зоны #}
+          {% if error > 10 %}
+            7
+          {% elif error > 5 %}
+            5
+          {% elif error > 2 %}
+            3
 
-            {# ─────────────────────────────────────────────────────────────── #}
-            {# РЕЖИМ 1: ZONED CONTROL (для больших отклонений)                #}
-            {# Источник: kvazis living_humidity.yaml                           #}
-            {# Логика: быстрая реакция на значительные отклонения             #}
-            {# ─────────────────────────────────────────────────────────────── #}
-            {% if error > 10 %}
-              {# Критически низкая влажность → максимальная мощность #}
-              7
-            {% elif error > 5 %}
-              {# Низкая влажность → высокая мощность #}
-              5
-            {% elif error > 2 %}
-              {# Умеренно низкая → средняя мощность #}
-              3
-            {% elif error > 1 %}
-              {# Малое отклонение 1-2% → низкая-средняя мощность #}
-              2
-            {% elif error > 0.5 %}
-              {# Очень малое отклонение 0.5-1% → минимальная мощность #}
-              1
+          {# Малое недоувлажнение: гибридная часть, плавный рост #}
+          {% elif error > 1 %}
+            {{ [current_intensity + 1, 7] | min }}
 
-            {# ─────────────────────────────────────────────────────────────── #}
-            {# РЕЖИМ 2: INCREMENTAL CONTROL (переувлажнение)                  #}
-            {# Источник: Stack Overflow incremental method                     #}
-            {# Логика: плавное снижение при переувлажнении                    #}
-            {# ─────────────────────────────────────────────────────────────── #}
-            {% elif error < -2 %}
-              {# Сильное превышение → снизить на 1 (мин 0) #}
-              {{ [current_intensity - 1, 0] | max }}
-            {% elif error < -0.5 %}
-              {# Превышение цели → ВЫКЛЮЧИТЬ (0) #}
-              0
-            {% else %}
-              {# В пределах целевого диапазона (-0.5 до +0.5) → не менять #}
-              {{ current_intensity }}
-            {% endif %}
+          {# Переувлажнение: плавное снижение на 1 ступень #}
+          {% elif error < -1 %}
+            {{ [current_intensity - 1, 0] | max }}
+
+          {# Зона покоя ±1%: не меняем интенсивность (защита от дребезга) #}
+          {% else %}
+            {{ current_intensity }}
+          {% endif %}
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SCRIPTS
+# ──────────────────────────────────────────────────────────────────────────────
+
+script:
+  humidity_auto_resume:
+    alias: "Возобновить авто‑управление увлажнителем"
+    mode: single
+    sequence:
+      # Включить основную автоматику и детектор ручного управления
+      - service: automation.turn_on
+        target:
+          entity_id:
+            - automation.humidity_control_main
+            - automation.humidity_manual_override_detector
+      # Далее device_setup сработает сам по триггеру "control_main → on"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
@@ -165,123 +97,91 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   #  ИНИЦИАЛИЗАЦИЯ УСТРОЙСТВА
   # ══════════════════════════════════════════════════════════════════════════
-  - id: "Инициализация увлажнителя"
+  - id: humidity_device_setup
     alias: humidity_device_setup
-    description: "Включение и настройка всех параметров устройства"
+    description: "Инициализация увлажнителя при включении AUTO и после сбоев"
     mode: single
     max_exceeded: silent
+    initial_state: true
 
     trigger:
-      # При включении автоматизации
+      # Входим в AUTO: автоматизация humidity_control_main включена
       - platform: state
-        entity_id: input_boolean.humidity_auto_enabled
+        entity_id: automation.humidity_control_main
         to: "on"
-      # При выключении питания устройства
-      - platform: state
-        entity_id: switch.humidifier_puh_9105_puh_2709_power
-        to: "off"
-        for:
-          seconds: 5
 
-    condition:
-      - condition: state
-        entity_id: input_boolean.humidity_auto_enabled
-        state: "on"
+    condition: []
 
     action:
-      - variables:
-          recommended: "{{ states('sensor.recommended_intensity') | int(0) }}"
-
-      # ВАЖНО: Если recommended=0, НЕ запускать device_setup!
-      # Иначе создаётся цикл: control_main выключает power → device_setup включает обратно
-      - condition: template
-        value_template: "{{ recommended > 0 }}"
-
-      # Шаг 0: Выключить manual_control_detector чтобы не сработал во время setup
+      # Отключаем детектор, чтобы наши действия не считались ручными
       - service: automation.turn_off
         target:
-          entity_id: automation.humidity_manual_control_detector
+          entity_id: automation.humidity_manual_override_detector
 
-      # Шаг 1: Включить питание
+      # Включить питание
       - service: switch.turn_on
         target:
           entity_id: switch.humidifier_puh_9105_puh_2709_power
 
-      # Шаг 2: Подождать загрузки устройства
+      # Подождать загрузки устройства
       - delay:
           seconds: 2
 
-      # Шаг 3: Установить режим "home" (manual control)
+      # Режим "home" (ручное управление снаружи, автоматическое из HA)
       - service: humidifier.set_mode
         target:
           entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         data:
           mode: "home"
 
-      # Шаг 4: Настроить switches
-      # Отключить звук (пищалку)
+      # Настроить переключатели
       - service: switch.turn_off
         target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_sound
-
-      # Включить блокировку
+          entity_id:
+            - switch.humidifier_puh_9105_puh_2709_sound
+            - switch.humidifier_puh_9105_puh_2709_backlight
       - service: switch.turn_on
         target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
+          entity_id:
+            - switch.humidifier_puh_9105_puh_2709_child_lock
+            - switch.humidifier_puh_9105_puh_2709_ioniser
+            - switch.humidifier_puh_9105_puh_2709_warm_stream
 
-      # Включить ионизацию
-      - service: switch.turn_on
-        target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_ioniser
-
-      # Включить подогрев (теплый пар)
-      - service: switch.turn_on
-        target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_warm_stream
-
-      # Выключить подсветку
-      - service: switch.turn_off
-        target:
-          entity_id: switch.humidifier_puh_9105_puh_2709_backlight
-
-      # Шаг 5: Подождать чтобы все MQTT updates пришли и устройство стабилизировалось
+      # Подождать, чтобы MQTT‑состояния стабилизировались
       - delay:
           seconds: 20
 
-      # Шаг 6: Включить manual_control_detector обратно
+      # Включить детектор обратно
       - service: automation.turn_on
         target:
-          entity_id: automation.humidity_manual_control_detector
+          entity_id: automation.humidity_manual_override_detector
 
   # ══════════════════════════════════════════════════════════════════════════
-  #  ОСНОВНАЯ АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ
+  #  ОСНОВНАЯ АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ (AUTO)
   # ══════════════════════════════════════════════════════════════════════════
-  - id: "Управление интенсивностью увлажнителя"
+  - id: humidity_control_main
     alias: humidity_control_main
-    description: "Hybrid adaptive control: комнатная + уличная температура"
+    description: "Hybrid управление интенсивностью увлажнителя по целевой влажности"
     mode: single
     max_exceeded: silent
+    initial_state: true
 
     trigger:
-      # Периодическая проверка каждые 5 минут
+      # Проверка каждые 5 минут
       - platform: time_pattern
         minutes: "/5"
-      # При изменении текущей влажности
+      # Реакция на изменения влажности
       - platform: state
         entity_id: sensor.sensor_eva_humidity
-      # При изменении комнатной температуры
+      # Реакция на изменения комнатной температуры
       - platform: state
         entity_id: sensor.sensor_eva_temperature
-      # При изменении уличной температуры
+      # Реакция на изменения уличной температуры
       - platform: state
         entity_id: weather.forecast_home_assistant
         attribute: temperature
 
     condition:
-      # Автоматизация должна быть включена
-      - condition: state
-        entity_id: input_boolean.humidity_auto_enabled
-        state: "on"
       # Устройство без критических ошибок
       - condition: template
         value_template: >
@@ -294,57 +194,52 @@ automation:
           current: "{{ states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) }}"
 
       # ────────────────────────────────────────────────────────────────────────
-      # УПРАВЛЕНИЕ ПИТАНИЕМ (в зависимости от recommended)
+      # УПРАВЛЕНИЕ ПИТАНИЕМ
       # ────────────────────────────────────────────────────────────────────────
-      # ВАЖНО: Эта секция ДОЛЖНА быть ПЕРЕД проверкой готовности!
-      # Иначе если power=off, automation остановится и не сможет включить power.
       - choose:
-          # Если recommended = 0 → ВЫКЛЮЧИТЬ питание
+          # recommended = 0 → выключить питание, если оно включено
           - conditions:
               - condition: template
                 value_template: "{{ recommended == 0 }}"
               - condition: template
                 value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') == 'on' }}"
             sequence:
+              - service: automation.turn_off
+                target:
+                  entity_id: automation.humidity_manual_override_detector
               - service: switch.turn_off
                 target:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
-          # Если recommended > 0 И power НЕ ON (off/unknown/unavailable) → ВКЛЮЧИТЬ питание
+              - delay:
+                  seconds: 2
+              - service: automation.turn_on
+                target:
+                  entity_id: automation.humidity_manual_override_detector
+
+          # recommended > 0 и питание не ON → включить питание
           - conditions:
               - condition: template
                 value_template: "{{ recommended > 0 }}"
               - condition: template
                 value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') != 'on' }}"
             sequence:
+              - service: automation.turn_off
+                target:
+                  entity_id: automation.humidity_manual_override_detector
               - service: switch.turn_on
                 target:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
               - delay:
-                  seconds: 2  # Ждём загрузки устройства
-          # 🔄 PERIODIC HEARTBEAT - защита от MQTT stale state
-          # Если recommended > 0 И switch не менялся >30 минут → отправить turn_on
-          # Гарантирует включение даже при desync (HA показывает "on", устройство физически "off")
-          # turn_on is idempotent - безопасно отправлять даже если устройство уже включено
-          - conditions:
-              - condition: template
-                value_template: "{{ recommended > 0 }}"
-              - condition: template
-                value_template: >
-                  {{ (now() - states.switch.humidifier_puh_9105_puh_2709_power.last_changed).total_seconds() > 1800 }}
-            sequence:
-              - service: switch.turn_on
+                  seconds: 2
+              - service: automation.turn_on
                 target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_power
-              - delay:
-                  seconds: 2  # Ждём загрузки устройства
+                  entity_id: automation.humidity_manual_override_detector
 
       # ────────────────────────────────────────────────────────────────────────
       # ПРОВЕРКА ГОТОВНОСТИ УСТРОЙСТВА
       # ────────────────────────────────────────────────────────────────────────
-      # Если устройство НЕ готово → остановиться
-      # NOTE: После управления питанием - если power всё ещё off, значит recommended=0
       - choose:
-          # Если power OFF или режим неправильный → остановиться
+          # Если питание OFF или режим не home → остановиться
           - conditions:
               - condition: or
                 conditions:
@@ -355,9 +250,9 @@ automation:
                     value_template: >
                       {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
             sequence:
-              - stop: "Устройство выключено (recommended=0) или режим неправильный"
+              - stop: "Устройство выключено или режим не home"
 
-          # Если бак снят/пуст → только остановиться (уведомление отправит water_empty)
+          # Если бак пуст → остановиться (уведомление отправит другая автоматика)
           - conditions:
               - condition: state
                 entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
@@ -366,16 +261,21 @@ automation:
               - stop: "Нет воды в баке"
 
       # ────────────────────────────────────────────────────────────────────────
-      # УПРАВЛЕНИЕ ИНТЕНСИВНОСТЬЮ (если устройство готово)
+      # УПРАВЛЕНИЕ ИНТЕНСИВНОСТЬЮ
       # ────────────────────────────────────────────────────────────────────────
-      # Устанавливаем только если изменилась
+      # Ставим интенсивность только если она реально изменилась
       - condition: template
         value_template: "{{ recommended != current }}"
 
-      # Выключить detector перед изменением intensity
+      # И не чаще одного раза в 5 минут
+      - condition: template
+        value_template: >
+          {{ (now() - states.number.humidifier_puh_9105_puh_2709_intensity.last_changed).total_seconds() > 300 }}
+
+      # Отключить детектор, чтобы не поймать свои же действия
       - service: automation.turn_off
         target:
-          entity_id: automation.humidity_manual_control_detector
+          entity_id: automation.humidity_manual_override_detector
 
       - service: number.set_value
         target:
@@ -383,66 +283,81 @@ automation:
         data:
           value: "{{ recommended }}"
 
-      # Подождать MQTT updates
+      # Подождать MQTT‑обновления
       - delay:
           seconds: 20
 
-      # Включить detector обратно
+      # Включить детектор обратно
       - service: automation.turn_on
         target:
-          entity_id: automation.humidity_manual_control_detector
+          entity_id: automation.humidity_manual_override_detector
 
   # ══════════════════════════════════════════════════════════════════════════
-  #  ДЕТЕКТОР РУЧНОГО УПРАВЛЕНИЯ
+  #  ДЕТЕКТОР РУЧНОГО УПРАВЛЕНИЯ (MANUAL override)
   # ══════════════════════════════════════════════════════════════════════════
-  - id: "Детектор ручного управления увлажнителем"
-    alias: humidity_manual_control_detector
-    description: "Останавливает автоматизацию при изменении НЕ от неё"
+  - id: humidity_manual_override_detector
+    alias: humidity_manual_override_detector
+    description: "Переход в MANUAL при ручном управлении (пульт, кнопки, интеграции)"
     mode: restart
+    initial_state: true
 
     trigger:
-      # Ручное изменение интенсивности
+      # Любое изменение ключевых сущностей управления
       - platform: state
-        entity_id: number.humidifier_puh_9105_puh_2709_intensity
+        entity_id:
+          - number.humidifier_puh_9105_puh_2709_intensity
+          - switch.humidifier_puh_9105_puh_2709_power
+          - switch.humidifier_puh_9105_puh_2709_warm_stream
+          - switch.humidifier_puh_9105_puh_2709_backlight
+          - switch.humidifier_puh_9105_puh_2709_ioniser
+          - switch.humidifier_puh_9105_puh_2709_sound
+        for:
+          seconds: 2
+
+      - platform: state
+        entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+        attribute: mode
         for:
           seconds: 2
 
     condition:
-      # Value ДОЛЖЕН измениться (не только state update, но и value change)
+      # Значение действительно изменилось
       - condition: template
         value_template: >
-          {{ trigger.from_state.state != trigger.to_state.state }}
-      # Игнорировать инициализацию entity (unavailable/unknown → число)
+          {{ trigger.from_state is not none and trigger.to_state is not none
+             and trigger.from_state.state != trigger.to_state.state }}
+
+      # Не инициализация entity
       - condition: template
         value_template: >
           {{ trigger.from_state.state not in ['unavailable', 'unknown', 'none'] }}
-      # НЕ срабатывать если device_setup или control_main работают СЕЙЧАС
+
+      # Не срабатывать, если сейчас выполняется control_main или device_setup
       - condition: template
         value_template: >
-          {{ state_attr('automation.humidity_device_setup', 'current') | int(0) == 0 and
-             state_attr('automation.humidity_control_main', 'current') | int(0) == 0 }}
+          {{ state_attr('automation.humidity_control_main', 'current') | int(0) == 0 and
+             state_attr('automation.humidity_device_setup', 'current') | int(0) == 0 }}
 
     action:
-      # Выключить автоматизацию
-      - service: input_boolean.turn_off
+      # Переход в MANUAL: отключаем только основную автоматику управления устройством
+      - service: automation.turn_off
         target:
-          entity_id: input_boolean.humidity_auto_enabled
+          entity_id: automation.humidity_control_main
 
   # ══════════════════════════════════════════════════════════════════════════
   #  УВЕДОМЛЕНИЕ: ОШИБКА УСТРОЙСТВА
   # ══════════════════════════════════════════════════════════════════════════
-  - id: "Ошибка увлажнителя"
+  - id: humidity_device_error
     alias: humidity_device_error
     description: "Уведомление при возникновении ошибки устройства"
     mode: single
+    initial_state: true
 
     trigger:
-      # При изменении error sensor
       - platform: state
         entity_id: sensor.humidifier_puh_9105_puh_2709_error
 
     condition:
-      # Только если есть критическая ошибка (не 00, не 02)
       - condition: template
         value_template: >
           {% set err = trigger.to_state.state %}
@@ -452,30 +367,30 @@ automation:
       - variables:
           error_code: "{{ states('sensor.humidifier_puh_9105_puh_2709_error') }}"
           error_title: >
-            {% if error_code == '01' or error_code == 'low_water' %}
+            {% if error_code in ['01', 'low_water'] %}
               💧 Мало воды в увлажнителе
-            {% elif error_code == '03' or error_code == 'replace_filter' %}
+            {% elif error_code in ['03', 'replace_filter'] %}
               🔧 Замените фильтр увлажнителя
-            {% elif error_code == '04' or error_code == 'maximum_schedules' %}
+            {% elif error_code in ['04', 'maximum_schedules'] %}
               ⚠️ Превышено количество расписаний
-            {% elif error_code == '05' or error_code == 'clean_tank' %}
+            {% elif error_code in ['05', 'clean_tank'] %}
               🧼 Очистите бак увлажнителя
             {% else %}
               ⚠️ Ошибка увлажнителя
             {% endif %}
           error_message: >
-            {% if error_code == '01' or error_code == 'low_water' %}
+            {% if error_code in ['01', 'low_water'] %}
               Уровень воды слишком низкий.
               Наполните бак чистой водой.
-            {% elif error_code == '03' or error_code == 'replace_filter' %}
+            {% elif error_code in ['03', 'replace_filter'] %}
               Фильтр загрязнён и требует замены.
               Установите новый фильтр для продолжения работы.
 
               Управление приостановлено до замены фильтра.
-            {% elif error_code == '04' or error_code == 'maximum_schedules' %}
+            {% elif error_code in ['04', 'maximum_schedules'] %}
               Достигнуто максимальное количество настроенных расписаний.
               Удалите неиспользуемые расписания через приложение.
-            {% elif error_code == '05' or error_code == 'clean_tank' %}
+            {% elif error_code in ['05', 'clean_tank'] %}
               Бак требует очистки от накипи и бактерий.
               Выполните очистку согласно инструкции.
 
@@ -493,99 +408,3 @@ automation:
 
             Текущая влажность: {{ states('sensor.sensor_eva_humidity') }}%
             Целевая влажность: {{ states('sensor.adaptive_target_humidity') }}%
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  ВОССТАНОВЛЕНИЕ ПОСЛЕ RELOAD/RESTART
-  # ══════════════════════════════════════════════════════════════════════════
-  - id: "Восстановление после reload/restart"
-    alias: humidity_reload_recovery
-    description: "Инициализация устройства при reload/restart если автоматизация включена"
-    mode: single
-
-    trigger:
-      # При reload automations
-      - platform: event
-        event_type: automation_reloaded
-      # При HA restart
-      - platform: homeassistant
-        event: start
-
-    condition:
-      # Устройство не готово
-      - condition: or
-        conditions:
-          - condition: state
-            entity_id: switch.humidifier_puh_9105_puh_2709_power
-            state: "off"
-          - condition: template
-            value_template: >
-              {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
-
-    action:
-      # Задержка чтобы все entities загрузились
-      - delay:
-          seconds: 5
-      # Включить helper
-      - service: input_boolean.turn_on
-        target:
-          entity_id: input_boolean.humidity_auto_enabled
-      # Подождать чтобы helper точно включился
-      - delay:
-          seconds: 1
-      # Запустить device setup
-      - service: automation.trigger
-        target:
-          entity_id: automation.humidity_device_setup
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  📋 ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-#  1. ПЕРЕЗАГРУЗКА КОНФИГУРАЦИИ:
-#     Developer Tools → YAML → "YAML configuration reloading"
-#     → Reload all YAML configuration
-#
-#  2. ПРОВЕРКА РАБОТЫ:
-#     Developer Tools → States → найти:
-#     • sensor.adaptive_target_humidity - целевая влажность (адаптивная)
-#     • sensor.humidity_error - текущее отклонение
-#     • sensor.recommended_intensity - рекомендуемая мощность
-#
-#  3. УПРАВЛЕНИЕ:
-#     Settings → Devices & Services → Helpers:
-#     • input_boolean.humidity_auto_enabled - вкл/выкл автоматизацию
-#       (автоматически выключается при ручном управлении увлажнителем)
-#
-#  4. МОНИТОРИНГ:
-#     • sensor.sensor_eva_humidity - текущая влажность в комнате
-#     • sensor.sensor_eva_temperature - температура в комнате
-#     • weather.forecast_home_assistant - уличная температура (Met.no)
-#     • number.humidifier_puh_9105_puh_2709_intensity - интенсивность (0-7)
-#
-#  5. ПОНИМАНИЕ АДАПТИВНОГО АЛГОРИТМА:
-#     Формула учитывает ДВА фактора:
-#
-#     A) Комнатная температура (тепловой комфорт ISO 7730):
-#        - 18°C → цель 52.5%
-#        - 20°C → цель 50.0%
-#        - 22°C → цель 47.5%
-#        - 24°C → цель 45.0%
-#        - 26°C → цель 42.5%
-#
-#     B) Уличная температура (ASHRAE рекомендации):
-#        - > +10°C → макс 50%
-#        - 0°C → макс 40%
-#        - -10°C → макс 30%
-#        - -20°C → макс 20%
-#
-#     Финальная цель = min(A, B) в диапазоне 40-60% (ВОЗ)
-#
-#  6. МЕТОД УПРАВЛЕНИЯ (HYBRID):
-#     • При error > 10% → интенсивность 7 (максимум)
-#     • При error > 5% → интенсивность 5
-#     • При error > 2% → интенсивность 3
-#     • При error > 0.5% → текущая + 1 (постепенно)
-#     • При error < -2% → текущая - 1 (постепенно)
-#     • При |error| < 0.5% → не менять (гистерезис)
-#
-# ═══════════════════════════════════════════════════════════════════════════════

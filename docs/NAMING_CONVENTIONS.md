@@ -56,8 +56,8 @@ alias → entity_id через slugify
   # → automation.humidity_control_main
 
 - id: "Детектор ручного управления"
-  alias: humidity_manual_control_detector
-  # → automation.humidity_manual_control_detector
+  alias: humidity_manual_override_detector
+  # → automation.humidity_manual_override_detector
 
 # ❌ НЕПРАВИЛЬНО:
 - id: humidity_device_setup  # ← НЕ для людей
@@ -68,7 +68,9 @@ alias → entity_id через slugify
 
 ## 2. TEMPLATE SENSORS
 
-### Modern Format (для configuration.yaml)
+### Modern Format (интеграция `template`)
+
+Используется в **современных версиях Home Assistant** как в `configuration.yaml`, так и в packages.
 
 ```yaml
 template:
@@ -82,11 +84,9 @@ template:
           {{ template }}
 ```
 
-### Legacy Format (для packages - ОБЯЗАТЕЛЬНО!)
+### Legacy Format (исторический, для очень старых конфигов)
 
-**⚠️ ВАЖНО:** Modern format `template:` НЕ РАБОТАЕТ в packages!
-
-**Используй ТОЛЬКО legacy format в packages:**
+Раньше для packages приходилось использовать именно legacy‑формат:
 
 ```yaml
 sensor:
@@ -100,6 +100,10 @@ sensor:
           {{ template }}
 ```
 
+> 📝 **Важно:**  
+> В текущих версиях Home Assistant (и в этом репозитории) используется **modern format `template:` даже внутри packages**.  
+> Legacy‑формат через `sensor: - platform: template` оставлен только как опция для очень старых конфигураций.
+
 ### Entity ID Generation
 
 ```
@@ -110,11 +114,12 @@ name (modern) OR sensor_name (legacy) → entity_id через slugify
 - Lowercase
 - Replace spaces with underscores
 - Keep only [a-z0-9_]
-- Результат: sensor.{slugified_name}
+- Результат: `sensor.{slugified_name}`
 
 ### Примеры
 
-**Modern format (configuration.yaml):**
+**Modern format (рекомендуется, и в configuration.yaml, и в packages):**
+
 ```yaml
 template:
   - sensor:
@@ -129,11 +134,12 @@ template:
         # → sensor.humidity_error
 
       - name: "Recommended Intensity"
-        unique_id: recommended_intensity
+        unique_id: humidity_recommended_intensity
         # → sensor.recommended_intensity
 ```
 
-**Legacy format (packages):**
+**Legacy format (оставлен для справки):**
+
 ```yaml
 sensor:
   - platform: template
@@ -145,14 +151,15 @@ sensor:
 
       humidity_error:
         friendly_name: "Humidity Error"
+        unique_id: humidity_error
         # → sensor.humidity_error
 ```
 
 ### ⚠️ CRITICAL: Name Language for entity_id
 
-**entity_id генерируется из `name` через slugify.**
+**entity_id генерируется из `name` (modern) или `sensor_name` (legacy) через slugify.**
 
-**ПРАВИЛО:** Используй АНГЛИЙСКИЕ имена в `name` для предсказуемого entity_id.
+**ПРАВИЛО:** Используй АНГЛИЙСКИЕ имена для предсказуемого `entity_id`.
 
 ```yaml
 # ✅ ПРАВИЛЬНО:
@@ -169,12 +176,13 @@ sensor:
 ```
 
 **Почему:**
-1. Automations ссылаются на entity_id по `unique_id` в коде
-2. entity_id генерируется из `name` через slugify
-3. Русский `name` → транслитерация → unpredictable entity_id
-4. Automation ищет sensor.adaptive_target_humidity
-5. Sensor создан как sensor.adaptivnaia_tselevaia_vlazhnost
-6. **→ Spook ghost warning!**
+
+1. Automations ссылаются на `entity_id`.
+2. `entity_id` генерируется из `name` через slugify.
+3. Русский `name` → транслитерация → непредсказуемый `entity_id`.
+4. В коде ожидается `sensor.adaptive_target_humidity`.
+5. Фактически создан `sensor.adaptivnaia_tselevaia_vlazhnost`.
+6. → **«Призрачные» ошибки: automation не находит сенсор.**
 
 ---
 
@@ -255,7 +263,7 @@ helper_name → input_boolean.helper_name (exact)
 helper_name → input_number.helper_name (exact)
 ```
 
-**NO slugify applied!**
+**NO slugify applied!** (используется ровно то имя ключа)
 
 ### Примеры
 
@@ -276,7 +284,7 @@ input_number:
 # ❌ НЕПРАВИЛЬНО:
 input_boolean:
   humidity auto enabled:  # ← spaces not allowed
-  AutoEnabled:  # ← camelCase not recommended
+  AutoEnabled:            # ← camelCase не рекомендуется
 ```
 
 ---
@@ -309,9 +317,9 @@ script:
     alias: "Уведомление в Telegram"
     # → script.notify_telegram
 
-  turn_on_heating:
-    alias: "Включить отопление"
-    # → script.turn_on_heating
+  humidity_auto_resume:
+    alias: "Возобновить авто‑управление увлажнителем"
+    # → script.humidity_auto_resume
 ```
 
 ---
@@ -337,16 +345,16 @@ name → scene.{slugified_name}
 
 ## 📝 SUMMARY TABLE
 
-| Entity Type | entity_id Source | Slugify? | Language Rule |
-|-------------|------------------|----------|---------------|
-| Automation | `alias` | YES | English |
-| Template Sensor (modern) | `name` | YES | **English** |
-| Template Sensor (legacy) | `sensor_name` | YES | **English** |
-| Binary Sensor | `sensor_name` | YES | English |
-| Input Boolean | `helper_name` | NO | English |
-| Input Number | `helper_name` | NO | English |
-| Script | `script_name` | NO | English |
-| Scene | `name` | YES | English |
+| Entity Type             | entity_id Source    | Slugify? | Language Rule |
+|-------------------------|---------------------|----------|---------------|
+| Automation              | `alias`             | YES      | English       |
+| Template Sensor (modern)| `name`              | YES      | **English**   |
+| Template Sensor (legacy)| `sensor_name`       | YES      | **English**   |
+| Binary Sensor           | `sensor_name`       | YES      | English       |
+| Input Boolean           | `helper_name`       | NO       | English       |
+| Input Number            | `helper_name`       | NO       | English       |
+| Script                  | `script_name`       | NO       | English       |
+| Scene                   | `name`              | YES      | English       |
 
 ---
 
@@ -354,31 +362,22 @@ name → scene.{slugified_name}
 
 ### 1. Template Sensors in Packages
 
-**ТОЛЬКО LEGACY FORMAT:**
+**Старое правило «Только legacy в packages» больше не актуально.**
 
-```yaml
-# ✅ packages/humidity/sensors.yaml
-sensor:
-  - platform: template
-    sensors:
-      adaptive_target_humidity:
-        friendly_name: "Adaptive Target Humidity"
-        value_template: >
-          {{ states('sensor.temperature') }}
+- Ранее (старые версии HA, issue #50157) modern‑формат `template:` действительно плохо работал в packages.
+- **Сейчас (актуальные версии HA)** интеграция `template` корректно поддерживается и в `configuration.yaml`, и в packages.
 
-# ❌ НЕ РАБОТАЕТ В PACKAGES:
-template:
-  - sensor:
-      - name: "Adaptive Target Humidity"
-```
+**В этом репозитории:**
 
-**Причина:** Modern format `template:` cannot be merged in packages (GitHub issue #50157).
+- Для новых конфигураций рекомендуется **modern format `template:`**.
+- Legacy через `sensor: - platform: template` допустим только для обратной совместимости.
 
 ### 2. entity_id = English Names
 
 **Template sensors:**
-- `name` (modern) или `sensor_name` (legacy) → entity_id
-- **ВСЕГДА используй английские имена!**
+
+- `name` (modern) или `sensor_name` (legacy) → `entity_id` через slugify.
+- **ВСЕГДА используй английские имена** для этих полей.
 
 ```yaml
 # ✅ ПРАВИЛЬНО:
@@ -392,24 +391,24 @@ template:
 
 ### 3. unique_id vs entity_id
 
-- `unique_id` - для persistence в entity registry
-- `name` / `sensor_name` / `alias` - для генерации entity_id
+- `unique_id` – для persistence в entity registry.
+- `name` / `sensor_name` / `alias` – для генерации `entity_id`.
 - **НЕ ПУТАТЬ!**
 
 ```yaml
 # ✅ ПРАВИЛЬНО:
-- name: "Adaptive Target Humidity"  # → entity_id
-  unique_id: adaptive_target_humidity  # → persistence
+- name: "Adaptive Target Humidity"       # → entity_id
+  unique_id: adaptive_target_humidity    # → registry key
 
-# ❌ НЕПРАВИЛЬНО (но работает):
-- name: adaptive_target_humidity  # ← not user-friendly in UI
+# ❌ НЕУДОБНО (но работает):
+- name: adaptive_target_humidity         # ← не user‑friendly в UI
   unique_id: adaptive_target_humidity
 ```
 
 ### 4. Automations: id vs alias
 
-- `id` - для UI (русский OK)
-- `alias` - для entity_id (английский ОБЯЗАТЕЛЬНО)
+- `id` – для людей / UI (русский OK).
+- `alias` – для `entity_id` (английский **обязательно**).
 
 ```yaml
 # ✅ ПРАВИЛЬНО:
@@ -417,67 +416,73 @@ template:
   alias: humidity_device_setup
 
 # ❌ НЕПРАВИЛЬНО:
-- id: humidity_device_setup  # ← not user-friendly
-  alias: "Инициализация увлажнителя"  # ← will slugify to Cyrillic!
+- id: humidity_device_setup         # ← нечитабельно в UI
+  alias: "Инициализация увлажнителя" # ← slugify на кириллице
 ```
 
 ---
 
 ## 🔍 DEBUGGING entity_id
 
-### Check actual entity_id via API:
+### Посмотреть фактический entity_id через API:
 
 ```bash
 curl -s -H "Authorization: Bearer TOKEN" \
-  "https://hass.zapbrannigan.org/api/states/sensor.recommended_intensity" | \
+  "https://hass.example.org/api/states/sensor.recommended_intensity" | \
   jq '{entity_id, state, friendly_name: .attributes.friendly_name}'
 ```
 
-### If entity not found:
+### Если entity не найден:
 
-1. **List all sensors:**
-```bash
-curl -s -H "Authorization: Bearer TOKEN" \
-  "https://hass.zapbrannigan.org/api/states" | \
-  jq '[.[] | select(.entity_id | startswith("sensor."))] | .[].entity_id' | \
-  grep -i humidity
-```
+1. **Список всех сенсоров:**
 
-2. **Check for Cyrillic slugify:**
-```bash
-# If name was Russian, entity_id will be transliterated:
-sensor.rekomenduemaia_intensivnost  # ← from "Рекомендуемая интенсивность"
-```
+   ```bash
+   curl -s -H "Authorization: Bearer TOKEN" \
+     "https://hass.example.org/api/states" | \
+     jq '[.[] | select(.entity_id | startswith("sensor."))] | .[].entity_id' | \
+     grep -i humidity
+   ```
 
-3. **Fix:** Change `name` to English, reload YAML.
+2. **Проверить кириллический slugify:**
+
+   ```text
+   sensor.rekomenduemaia_intensivnost  # ← из "Рекомендуемая интенсивность"
+   ```
+
+3. **Фикс:** Переименовать `name` на английский, reload YAML.
 
 ---
 
 ## ✅ VERIFIED WORKING EXAMPLES
 
-From production (`packages/humidity/humidity_control.yaml`):
+Фрагменты из реального пакета `packages/humidity` (актуальная версия):
 
 ```yaml
-# Input Helper
-input_boolean:
-  humidity_auto_enabled:
-    name: "Автоматизация влажности"
-    # → input_boolean.humidity_auto_enabled ✅
-
-# Template Sensors (legacy format for packages)
+# Template Sensors (modern format, используется и в packages)
 template:
   - sensor:
       - name: "Adaptive Target Humidity"
         unique_id: adaptive_target_humidity
+        unit_of_measurement: "%"
+        state_class: measurement
         # → sensor.adaptive_target_humidity ✅
 
       - name: "Humidity Error"
         unique_id: humidity_error
+        unit_of_measurement: "%"
+        state_class: measurement
         # → sensor.humidity_error ✅
 
       - name: "Recommended Intensity"
-        unique_id: recommended_intensity
+        unique_id: humidity_recommended_intensity
+        icon: mdi:gauge
         # → sensor.recommended_intensity ✅
+
+# Script
+script:
+  humidity_auto_resume:
+    alias: "Возобновить авто‑управление увлажнителем"
+    # → script.humidity_auto_resume ✅
 
 # Automations
 automation:
@@ -488,10 +493,17 @@ automation:
   - id: "Управление интенсивностью увлажнителя"
     alias: humidity_control_main
     # → automation.humidity_control_main ✅
+
+  - id: "Детектор ручного управления увлажнителем"
+    alias: humidity_manual_override_detector
+    # → automation.humidity_manual_override_detector ✅
 ```
+
+> 📝 Примечание:  
+> Конкретные helpers (например, `input_boolean.humidity_auto_enabled`) могли использоваться в ранних версиях пакета, но как примеры нейминга они по‑прежнему валидны. Текущая архитектура увлажнителя опирается на включённость/выключенность самих автоматизаций и скрипт `humidity_auto_resume`.
 
 ---
 
-**Last Updated:** 2025-11-22
-**Version:** 1.0
+**Last Updated:** 2025‑11‑24  
+**Version:** 1.1  
 **Tested with:** Home Assistant 2025.11.3
