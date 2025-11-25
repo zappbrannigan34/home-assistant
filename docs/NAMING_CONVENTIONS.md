@@ -155,6 +155,35 @@ sensor:
         # → sensor.humidity_error
 ```
 
+### ⚠️ KNOWN ISSUES: Template Sensors in Packages (CRITICAL!)
+
+**🚨 Problem:** Modern `template:` syntax может **fail silently** в packages после `reload_all`
+
+**Symptoms:**
+- ✅ Configuration check passes (no errors)
+- ✅ Logs показывают success
+- ❌ Entities НЕ СОЗДАНЫ в system
+
+**Root Cause:**
+- Home Assistant Core issue #145567 (2025.5.3+)
+- Template entities в packages требуют **FULL RESTART**
+- `homeassistant.reload_all` недостаточно для INITIAL entity creation
+- Reload работает только для UPDATES существующих entities
+
+**SOLUTION:**
+1. После добавления НОВЫХ template sensors в packages → **RESTART Home Assistant**
+   ```bash
+   homeassistant.restart  # НЕ reload_all!
+   ```
+2. После изменения СУЩЕСТВУЮЩИХ sensors → `template.reload` достаточно
+
+**Verified Sources:**
+- https://github.com/home-assistant/core/issues/145567
+- https://community.home-assistant.io/t/can-not-put-modern-style-template-sensor-in-sensors-yaml/482819
+- https://community.home-assistant.io/t/template-sensors-not-created-no-errors-in-log-configuration-ok/943228
+
+---
+
 ### ⚠️ CRITICAL: Name Language for entity_id
 
 **entity_id генерируется из `name` (modern) или `sensor_name` (legacy) через slugify.**

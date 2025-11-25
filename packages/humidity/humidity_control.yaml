@@ -1,19 +1,36 @@
 # package: puh_9105_humidity
-# Version: 2.0.1
-# Last Updated: 2025-11-24
+# Version: 2.0.4
+# Last Updated: 2025-11-25
+# Fix: Converted to trigger-based templates (states() doesn't create entity tracking)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 template:
-  - sensor:
+  - trigger:
+      # Триггеры для всех source entities
+      - platform: state
+        entity_id: sensor.sensor_eva_humidity
+      - platform: state
+        entity_id: sensor.sensor_eva_temperature
+      - platform: state
+        entity_id: weather.forecast_home_assistant
+        attribute: temperature
+      # Fallback: обновление каждые 5 минут
+      - platform: time_pattern
+        minutes: "/5"
+    sensor:
       # АДАПТИВНАЯ ЦЕЛЕВАЯ ВЛАЖНОСТЬ (ВОЗ + температуры)
       - name: "Adaptive Target Humidity"
         unique_id: adaptive_target_humidity
         unit_of_measurement: "%"
         state_class: measurement
         icon: mdi:water-thermometer-outline
+        availability: >
+          {{ has_value('sensor.sensor_eva_temperature') and
+             has_value('weather.forecast_home_assistant') }}
         state: >
           {# Температура в комнате #}
           {% set T_room = states('sensor.sensor_eva_temperature') | float(22) %}
@@ -38,6 +55,9 @@ template:
         unit_of_measurement: "%"
         state_class: measurement
         icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.adaptive_target_humidity') and
+             has_value('sensor.sensor_eva_humidity') }}
         state: >
           {% set target = states('sensor.adaptive_target_humidity') | float(45) %}
           {% set current = states('sensor.sensor_eva_humidity') | float(50) %}
@@ -47,6 +67,9 @@ template:
       - name: "Recommended Intensity"
         unique_id: humidity_recommended_intensity
         icon: mdi:gauge
+        availability: >
+          {{ has_value('sensor.humidity_error') and
+             has_value('number.humidifier_puh_9105_puh_2709_intensity') }}
         state: >
           {% set error = states('sensor.humidity_error') | float(0) %}
           {% set current_intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
@@ -99,7 +122,6 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   - id: humidity_device_setup
     alias: humidity_device_setup
-    description: "Инициализация увлажнителя при включении AUTO и после сбоев"
     mode: single
     max_exceeded: silent
     initial_state: true
@@ -161,7 +183,6 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   - id: humidity_control_main
     alias: humidity_control_main
-    description: "Hybrid управление интенсивностью увлажнителя по целевой влажности"
     mode: single
     max_exceeded: silent
     initial_state: true
@@ -297,7 +318,6 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   - id: humidity_manual_override_detector
     alias: humidity_manual_override_detector
-    description: "Переход в MANUAL при ручном управлении (пульт, кнопки, интеграции)"
     mode: restart
     initial_state: true
 
@@ -349,7 +369,6 @@ automation:
   # ══════════════════════════════════════════════════════════════════════════
   - id: humidity_device_error
     alias: humidity_device_error
-    description: "Уведомление при возникновении ошибки устройства"
     mode: single
     initial_state: true
 
