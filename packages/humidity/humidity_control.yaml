@@ -1,7 +1,7 @@
 # package: puh_9105_humidity
-# Version: 2.0.4
+# Version: 2.0.5
 # Last Updated: 2025-11-25
-# Fix: Converted to trigger-based templates (states() doesn't create entity tracking)
+# Fix: Added homeassistant start trigger to device_setup for automatic mode restoration after restart
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
@@ -131,8 +131,16 @@ automation:
       - platform: state
         entity_id: automation.humidity_control_main
         to: "on"
+      # Восстановление после restart Home Assistant
+      - platform: homeassistant
+        event: start
 
-    condition: []
+
+    condition:
+      # Срабатывать только если control_main включена (AUTO режим активен)
+      - condition: state
+        entity_id: automation.humidity_control_main
+        state: "on"
 
     action:
       # Отключаем детектор, чтобы наши действия не считались ручными
@@ -155,6 +163,13 @@ automation:
           entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         data:
           mode: "home"
+
+      # Установить целевую влажность на максимум (режим Intensity следует глобальному humidity!)
+      - service: humidifier.set_humidity
+        target:
+          entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+        data:
+          humidity: 75
 
       # Настроить переключатели
       - service: switch.turn_off

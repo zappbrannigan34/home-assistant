@@ -6,6 +6,43 @@
 
 ---
 
+## [2.0.5] - 2025-11-25
+
+### 🐛 Fixed
+- **CRITICAL:** Device mode not restored to "home" after Home Assistant restart
+- Root cause: `device_setup` trigger only fires on state CHANGE (off→on), not on load
+- After restart: `automation.humidity_control_main` loads as "on" (initial_state: true)
+- No state change occurs → device_setup never triggers → mode stays "auto"
+
+- **CRITICAL:** Device enters standby despite mode="home" and intensity=7
+- Root cause: Device respects global `humidity` parameter even in Mode 5 (Intensity)
+- Default humidity=30% → device stops when current_humidity ≥ 30%
+- Solution: Set `humidity=75` (max) together with mode="home"
+
+### 🔍 Discovery (Source Code Analysis)
+- Analyzed Polaris PUH-9105 device definition from [polaris-mqtt repo](https://github.com/samoswall/polaris-mqtt)
+- Mode "home" in HA API = **Mode 5 (Intensity)** in device firmware
+- Mode 5 has NO humidity control in program limits (max: 0, min: 0)
+- **BUT:** Device has GLOBAL `humidity` parameter (default: 30, max: 75, step: 5)
+- Global `humidity` parameter applies to ALL modes, including Intensity mode
+- Device enters standby when `current_humidity >= humidity` target
+
+### 🔄 Changed
+- Added `platform: homeassistant, event: start` trigger to `device_setup`
+- Added condition check: only run if `control_main` is "on" (AUTO mode active)
+- **Added `humidifier.set_humidity` service call with `humidity: 75`** to `device_setup`
+- Automatic mode restoration after restart when in AUTO mode
+- No action if system was in MANUAL mode before restart
+
+### ⚠️ Migration
+- **NO restart required** (live reload works)
+- Backup created: `humidity_control.yaml.v204.bak`
+- Next HA restart will auto-restore mode="home" AND humidity=75%
+- Device will no longer enter standby at 30% humidity
+
+
+---
+
 ## [2.0.4] - 2025-11-25
 
 ### 🐛 Fixed
@@ -89,8 +126,8 @@ sensor.recommended_intensity: 7
 2. Config check
 3. **Restart Home Assistant** (not reload!)
 4. Wait 60s
-5. Verify sensors show real values
-
+3. **Reload YAML** (не требуется restart!)
+4. Проверить что mode="home" (только при следующем restart HA)
 ---
 
 **See also:**
