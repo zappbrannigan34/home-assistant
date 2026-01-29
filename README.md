@@ -37,6 +37,8 @@
 ```text
 home-assistant/
 ├── README.md                   # Общая информация о проекте
+├── dashboards/
+│   └── humidity_dashboard.yaml # Дашборд управления увлажнителем
 ├── docs/
 │   ├── NAMING_CONVENTIONS.md   # Правила нейминга сущностей
 │   └── HUMIDITY_CHANGELOG.md   # История изменений пакета humidity

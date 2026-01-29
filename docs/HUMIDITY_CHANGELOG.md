@@ -7,6 +7,40 @@
 
 ---
 
+## v3.1 – PER-LEVEL CONSUMPTION RATE CALIBRATION (2026-01-29)
+
+**Version:** 3.1.0
+
+### Изменения
+
+#### 1. Автокалибровка расхода per-level (вместо калибровки ёмкости бака)
+
+**Было:** калибровалась ёмкость бака (костыль — бак не резиновый, всегда 5000 мл).  
+**Стало:** ёмкость бака = константа. Калибруются **ставки расхода** (мл/ч) для каждого из 7 уровней интенсивности.
+
+- `input_text.humidifier_consumption_rates` — JSON с калиброванными ставками
+- `input_text.humidifier_level_minutes` — JSON-счётчик минут работы на каждом уровне
+- `automation.humidifier_track_level_minutes` — каждую минуту +1 к счётчику текущего уровня
+- `automation.humidifier_calibrate_rates` — при опустошении:
+  - `correction = capacity / model_consumed`
+  - Для уровней с >5 мин работы — EMA-коррекция ставки
+  - Уровни с <5 мин — без изменений (мало данных)
+  - Сброс счётчика минут
+
+#### 2. Дашборд
+
+- Добавлено отображение оставшегося времени (`hours_remaining`)
+- Добавлены строки: калиброванные ставки, минуты текущего цикла, циклы калибровки
+- Убрана кнопка Resume Auto Control
+
+#### 3. Сенсоры
+
+- `sensor.humidifier_water_consumed` — использует калиброванные ставки вместо линейной формулы
+- `sensor.humidifier_water_level` → `hours_remaining` использует калиброванную ставку текущего уровня
+- Атрибут `consumption_rates` добавлен к water level sensor
+
+---
+
 ## v9 – ARCHITECTURE REWRITE / HYBRID 2.0 (2025-11-24)
 
 **Commit:** TBD  
