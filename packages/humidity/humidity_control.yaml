@@ -1,16 +1,168 @@
 # package: puh_9105_humidity
-# Version: 2.0.5
-# Last Updated: 2025-11-25
-# Fix: Added homeassistant start trigger to device_setup for automatic mode restoration after restart
+# Version: 3.0.0
+# Last Updated: 2025-01-27
+# Changes: Added PD-controller with predictive damping (no configuration.yaml needed)
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT NUMBERS (калибровка бака)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_number:
+  humidifier_tank_capacity_ml:
+    name: "Humidifier Tank Capacity (fixed)"
+    min: 2000
+    max: 8000
+    step: 100
+    initial: 5000
+    unit_of_measurement: "ml"
+    mode: box
+
+  humidifier_calibration_cycles:
+    name: "Humidifier Rate Calibration Cycles"
+    min: 0
+    max: 20
+    step: 1
+    initial: 0
+    mode: box
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT TEXT (per-level calibration data, persisted as JSON)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_text:
+  humidifier_consumption_rates:
+    name: "Humidifier Per-Level Consumption Rates (ml/h JSON)"
+    max: 255
+    initial: '{"1":71.4,"2":142.9,"3":214.3,"4":285.7,"5":357.1,"6":428.6,"7":500.0}'
+
+  humidifier_last_calibration:
+    name: "Humidifier Last Calibration Result (JSON)"
+    max: 255
+    initial: '{"correction":1.0,"model_ml":0,"cycle":0,"timestamp":""}'
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT DATETIME (начало цикла для history_stats)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_datetime:
+  humidifier_cycle_start:
+    name: "Humidifier Cycle Start Time"
+    has_date: true
+    has_time: true
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  HISTORY STATS — время работы на каждом уровне за текущий цикл
+# ──────────────────────────────────────────────────────────────────────────────
+
+sensor:
+  - platform: history_stats
+    name: "Humidifier Level 1 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "1"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 2 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "2"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 3 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "3"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 4 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "4"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 5 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "5"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 6 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "6"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: "Humidifier Level 7 Hours"
+    entity_id: number.humidifier_puh_9105_puh_2709_intensity
+    state: "7"
+    type: time
+    start: >
+      {{ states('input_datetime.humidifier_cycle_start') | as_datetime | default(today_at('00:00'), true) }}
+    end: "{{ now() }}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
 # ──────────────────────────────────────────────────────────────────────────────
 
-
 template:
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ (замена derivative sensor)
+  # ════════════════════════════════════════════════════════════════════════════
   - trigger:
-      # Триггеры для всех source entities
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Humidity Rate"
+        unique_id: humidity_rate
+        unit_of_measurement: "%/min"
+        state_class: measurement
+        icon: mdi:trending-up
+        state: >
+          {% set current = states('sensor.sensor_eva_humidity') | float(none) %}
+          {% if current is none %}
+            {{ this.state | default(0) }}
+          {% else %}
+            {# Берём значение 5 минут назад (5 шагов × 1 мин) #}
+            {% set old = this.attributes.h5 | default(current) | float(current) %}
+            {% set rate = (current - old) / 5 %}
+            {# EMA сглаживание для уменьшения шума #}
+            {% set prev_rate = this.state | float(0) %}
+            {{ (0.4 * rate + 0.6 * prev_rate) | round(3) }}
+          {% endif %}
+        attributes:
+          # Кольцевой буфер: каждую 1 мин сдвигаем историю
+          h1: "{{ states('sensor.sensor_eva_humidity') | float(0) }}"
+          h2: "{{ this.attributes.h1 | default(states('sensor.sensor_eva_humidity')) | float(0) }}"
+          h3: "{{ this.attributes.h2 | default(states('sensor.sensor_eva_humidity')) | float(0) }}"
+          h4: "{{ this.attributes.h3 | default(states('sensor.sensor_eva_humidity')) | float(0) }}"
+          h5: "{{ this.attributes.h4 | default(states('sensor.sensor_eva_humidity')) | float(0) }}"
+          current_humidity: "{{ states('sensor.sensor_eva_humidity') | float(0) }}"
+          minutes_window: 5
+
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 2: ОСНОВНЫЕ СЕНСОРЫ (цель, ошибка, рекомендация)
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
       - platform: state
         entity_id: sensor.sensor_eva_humidity
       - platform: state
@@ -18,11 +170,14 @@ template:
       - platform: state
         entity_id: weather.forecast_home_assistant
         attribute: temperature
-      # Fallback: обновление каждые 5 минут
+      - platform: state
+        entity_id: sensor.humidity_rate
       - platform: time_pattern
-        minutes: "/5"
+        minutes: "/1"
     sensor:
-      # АДАПТИВНАЯ ЦЕЛЕВАЯ ВЛАЖНОСТЬ (ВОЗ + температуры)
+      # ──────────────────────────────────────────────────────────────────────────
+      #  АДАПТИВНАЯ ЦЕЛЕВАЯ ВЛАЖНОСТЬ
+      # ──────────────────────────────────────────────────────────────────────────
       - name: "Adaptive Target Humidity"
         unique_id: adaptive_target_humidity
         unit_of_measurement: "%"
@@ -32,24 +187,17 @@ template:
           {{ has_value('sensor.sensor_eva_temperature') and
              has_value('weather.forecast_home_assistant') }}
         state: >
-          {# Температура в комнате #}
           {% set T_room = states('sensor.sensor_eva_temperature') | float(22) %}
-          {# Температура на улице (Met.no / другая weather-интеграция) #}
           {% set T_outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-
-          {# Базовая цель от комнатной температуры (комфортный диапазон) #}
           {% set base_indoor = 75 - (1.25 * T_room) %}
-          {# Ограничение от уличной температуры (ASHRAE/REHVA/Aprilaire-подход) #}
           {% set outdoor_limit = 50 - [0, 10 - T_outdoor] | max %}
-
-          {# Итог: минимум из indoor/outdoor/максимума 60% #}
           {% set target = [base_indoor, outdoor_limit, 60] | min | float %}
-          {# Жёсткие медицинские границы ВОЗ: 40–60% #}
           {% set target = [target, 40] | max %}
-
           {{ target | round(1) }}
 
-      # ТЕКУЩЕЕ ОТКЛОНЕНИЕ (ошибка регулирования)
+      # ──────────────────────────────────────────────────────────────────────────
+      #  ОШИБКА РЕГУЛИРОВАНИЯ
+      # ──────────────────────────────────────────────────────────────────────────
       - name: "Humidity Error"
         unique_id: humidity_error
         unit_of_measurement: "%"
@@ -63,37 +211,314 @@ template:
           {% set current = states('sensor.sensor_eva_humidity') | float(50) %}
           {{ (target - current) | round(1) }}
 
-      # РЕКОМЕНДУЕМАЯ ИНТЕНСИВНОСТЬ (HYBRID + гистерезис ±1%)
+      # ──────────────────────────────────────────────────────────────────────────
+      #  PD-РЕГУЛЯТОР: РЕКОМЕНДУЕМАЯ ИНТЕНСИВНОСТЬ
+      # ──────────────────────────────────────────────────────────────────────────
       - name: "Recommended Intensity"
         unique_id: humidity_recommended_intensity
         icon: mdi:gauge
         availability: >
           {{ has_value('sensor.humidity_error') and
+             has_value('sensor.humidity_rate') and
              has_value('number.humidifier_puh_9105_puh_2709_intensity') }}
         state: >
           {% set error = states('sensor.humidity_error') | float(0) %}
-          {% set current_intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
-
-          {# Крупные положительные ошибки: быстрый выход на верхние зоны #}
-          {% if error > 10 %}
-            7
-          {% elif error > 5 %}
-            5
-          {% elif error > 2 %}
-            3
-
-          {# Малое недоувлажнение: гибридная часть, плавный рост #}
-          {% elif error > 1 %}
-            {{ [current_intensity + 1, 7] | min }}
-
-          {# Переувлажнение: плавное снижение на 1 ступень #}
-          {% elif error < -1 %}
-            {{ [current_intensity - 1, 0] | max }}
-
-          {# Зона покоя ±1%: не меняем интенсивность (защита от дребезга) #}
-          {% else %}
-            {{ current_intensity }}
+          {% set rate = states('sensor.humidity_rate') | float(0) %}
+          {% set current = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
+          
+          {# ═══════════════════════════════════════════════════════════════
+             НАСТРАИВАЕМЫЕ ПАРАМЕТРЫ PD-РЕГУЛЯТОРА
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set PREDICTION_MINUTES = 7 %}
+          {% set DEADBAND = 2.0 %}
+          
+          {# ═══════════════════════════════════════════════════════════════
+             ПРОГНОЗ ОШИБКИ
+             
+             Если error=+5% и rate=+0.5%/мин:
+             predicted = 5 - 0.5×7 = 1.5%
+             → через 7 мин будем почти в цели → тормозим сейчас!
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set predicted_error = error - (rate * PREDICTION_MINUTES) %}
+          
+          {# ═══════════════════════════════════════════════════════════════
+             АДАПТИВНОЕ ДЕМПФИРОВАНИЕ
+             Чем быстрее приближаемся к цели — тем сильнее тормозим
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set damping = 0 %}
+          
+          {# Растём к цели (недоувлажнение + влажность растёт) #}
+          {% if error > 0 and rate > 0.15 %}
+            {% if error < 2 and rate > 0.3 %}
+              {% set damping = 3 %}
+            {% elif error < 3 and rate > 0.4 %}
+              {% set damping = 2 %}
+            {% elif error < 4 and rate > 0.3 %}
+              {% set damping = 2 %}
+            {% elif error < 6 and rate > 0.3 %}
+              {% set damping = 1 %}
+            {% elif error < 8 and rate > 0.5 %}
+              {% set damping = 1 %}
+            {% endif %}
           {% endif %}
+          
+          {# Падаем к цели (переувлажнение + влажность падает) #}
+          {% if error < 0 and rate < -0.15 %}
+            {% if error > -2 and rate < -0.3 %}
+              {% set damping = -1 %}
+            {% elif error > -3 and rate < -0.2 %}
+              {% set damping = -1 %}
+            {% endif %}
+          {% endif %}
+          
+          {# ═══════════════════════════════════════════════════════════════
+             ОПРЕДЕЛЕНИЕ БАЗОВОЙ ИНТЕНСИВНОСТИ ПО ПРОГНОЗУ
+             Недоувлажнение → максимум. Поддержание → плавно.
+             ═══════════════════════════════════════════════════════════════ #}
+          {% if predicted_error > DEADBAND %}
+            {% set target_intensity = 7 %}
+            
+          {# --- ЗОНА СТАБИЛЬНОСТИ --- #}
+          {% elif predicted_error >= -DEADBAND %}
+            {% if current <= 2 %}
+              {% set target_intensity = current %}
+            {% elif predicted_error < 0 %}
+              {% set target_intensity = [current - 1, 1] | max %}
+            {% else %}
+              {% set target_intensity = current %}
+            {% endif %}
+            
+          {# --- ПЕРЕУВЛАЖНЕНИЕ --- #}
+          {% elif predicted_error > -4 %}
+            {% set target_intensity = 1 %}
+          {% elif predicted_error > -6 %}
+            {% set target_intensity = 0 %}
+          {% else %}
+            {% set target_intensity = 0 %}
+          {% endif %}
+          
+          {# ═══════════════════════════════════════════════════════════════
+             ПРИМЕНЕНИЕ ДЕМПФИРОВАНИЯ
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set target_intensity = target_intensity - damping %}
+          {% set target_intensity = [target_intensity, 0] | max %}
+          {% set target_intensity = [target_intensity, 7] | min %}
+          
+           {# ═══════════════════════════════════════════════════════════════
+              ОГРАНИЧЕНИЕ СКОРОСТИ ИЗМЕНЕНИЯ (+3 вверх / -2 вниз)
+              ═══════════════════════════════════════════════════════════════ #}
+           {% if target_intensity > current + 3 %}
+             {% set target_intensity = current + 3 %}
+           {% elif target_intensity < current - 2 %}
+             {% set target_intensity = current - 2 %}
+           {% endif %}
+           
+           {# ═══════════════════════════════════════════════════════════════
+              АНТИОСЦИЛЛЯЦИЯ: если в зоне стабильности и за последние
+              5 шагов направление менялось ≥3 раз → держим текущее
+              ═══════════════════════════════════════════════════════════════ #}
+           {% set in_stability = (predicted_error >= -DEADBAND and predicted_error <= DEADBAND) %}
+           {% if in_stability and target_intensity != current %}
+             {% set h = [
+               this.attributes.i1 | default(current) | int,
+               this.attributes.i2 | default(current) | int,
+               this.attributes.i3 | default(current) | int,
+               this.attributes.i4 | default(current) | int,
+               this.attributes.i5 | default(current) | int
+             ] %}
+             {% set ns = namespace(changes=0) %}
+             {% for i in range(1, h | length) %}
+               {% if h[i] != h[i-1] %}
+                 {% set ns.changes = ns.changes + 1 %}
+               {% endif %}
+             {% endfor %}
+             {% if ns.changes >= 3 %}
+               {% set target_intensity = current %}
+             {% endif %}
+           {% endif %}
+           
+           {{ target_intensity | int }}
+          
+        attributes:
+          error: "{{ states('sensor.humidity_error') | float(0) }}"
+          rate: "{{ states('sensor.humidity_rate') | float(0) }}"
+          predicted_error: >
+            {% set error = states('sensor.humidity_error') | float(0) %}
+            {% set rate = states('sensor.humidity_rate') | float(0) %}
+            {{ (error - (rate * 7)) | round(1) }}
+          damping: >
+            {% set error = states('sensor.humidity_error') | float(0) %}
+            {% set rate = states('sensor.humidity_rate') | float(0) %}
+            {% set d = 0 %}
+            {% if error > 0 and rate > 0.15 %}
+              {% if error < 2 and rate > 0.3 %}
+                {% set d = 3 %}
+              {% elif error < 3 and rate > 0.4 %}
+                {% set d = 2 %}
+              {% elif error < 4 and rate > 0.3 %}
+                {% set d = 2 %}
+              {% elif error < 6 and rate > 0.3 %}
+                {% set d = 1 %}
+              {% elif error < 8 and rate > 0.5 %}
+                {% set d = 1 %}
+              {% endif %}
+            {% elif error < 0 and rate < -0.15 %}
+              {% if error > -2 and rate < -0.3 %}
+                {% set d = -1 %}
+              {% elif error > -3 and rate < -0.2 %}
+                {% set d = -1 %}
+              {% endif %}
+            {% endif %}
+            {{ d }}
+          control_mode: >
+            {% set error = states('sensor.humidity_error') | float(0) %}
+            {% set rate = states('sensor.humidity_rate') | float(0) %}
+            {% set predicted = error - (rate * 7) %}
+            {% if predicted > 2 %}
+              humidifying
+            {% elif predicted < -2 %}
+              drying
+            {% else %}
+              stable
+            {% endif %}
+          # Кольцевой буфер последних 5 значений интенсивности (для антиосцилляции)
+          i1: "{{ this.state | default(0) | int }}"
+          i2: "{{ this.attributes.i1 | default(0) | int }}"
+          i3: "{{ this.attributes.i2 | default(0) | int }}"
+          i4: "{{ this.attributes.i3 | default(0) | int }}"
+          i5: "{{ this.attributes.i4 | default(0) | int }}"
+          flapping: >
+            {% set h = [
+              this.attributes.i1 | default(0) | int,
+              this.attributes.i2 | default(0) | int,
+              this.attributes.i3 | default(0) | int,
+              this.attributes.i4 | default(0) | int,
+              this.attributes.i5 | default(0) | int
+            ] %}
+            {% set ns = namespace(changes=0) %}
+            {% for i in range(1, h | length) %}
+              {% if h[i] != h[i-1] %}
+                {% set ns.changes = ns.changes + 1 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.changes }}
+          # Перелёт: текущая влажность выше цели (overshoot)
+          overshoot: >
+            {% set error = states('sensor.humidity_error') | float(0) %}
+            {{ error < -1.0 }}
+          overshoot_pct: >
+            {% set error = states('sensor.humidity_error') | float(0) %}
+            {{ ([0, -error] | max) | round(1) }}
+
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 3: ВИРТУАЛЬНЫЙ СЕНСОР УРОВНЯ ВОДЫ (автокалибровка)
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
+      # Тик каждую минуту для накопления расхода
+      - platform: time_pattern
+        minutes: "/1"
+        id: "tick"
+      # Изменение ошибки устройства (заправка / опустошение)
+      - platform: state
+        entity_id: sensor.humidifier_puh_9105_puh_2709_error
+        id: "error_change"
+      # Изменение питания
+      - platform: state
+        entity_id: switch.humidifier_puh_9105_puh_2709_power
+        id: "power_change"
+      # Снятие бака
+      - platform: state
+        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
+        id: "tank_change"
+    sensor:
+      # ──────────────────────────────────────────────────────────────────────────
+      #  НАКОПЛЕННЫЙ РАСХОД ВОДЫ (мл) — с калиброванными ставками per-level
+      # ──────────────────────────────────────────────────────────────────────────
+      - name: "Humidifier Water Consumed"
+        unique_id: humidifier_water_consumed_ml
+        unit_of_measurement: "ml"
+        state_class: total
+        icon: mdi:water-minus
+        state: >
+          {% set current = this.state | float(0) %}
+          {% if trigger is not defined %}
+            {{ current }}
+          {% else %}
+            {% set error = states('sensor.humidifier_puh_9105_puh_2709_error') %}
+            {% set prev_error = trigger.from_state.state if trigger.id == 'error_change' else none %}
+            {% set tank_removed = is_state('binary_sensor.humidifier_puh_9105_puh_2709_water_tank', 'on') %}
+            {% set power_on = is_state('switch.humidifier_puh_9105_puh_2709_power', 'on') %}
+            {% set intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
+            
+            {# Заправка: ошибка воды ушла → бак наполнен → сброс #}
+            {% if trigger.id == 'error_change'
+               and prev_error in ['low_water', '01']
+               and error in ['no_error', '00', '02', 'child_lock'] %}
+              {{ 0 }}
+            {# Накопление: устройство работает #}
+            {% elif trigger.id == 'tick'
+                and power_on
+                and not tank_removed
+                and error in ['no_error', '00', '02', 'child_lock']
+                and intensity > 0 %}
+              {# Калиброванная ставка для текущего уровня (мл/ч) #}
+              {% set rates_raw = states('input_text.humidifier_consumption_rates') %}
+              {% set defaults = {"1":71.4,"2":142.9,"3":214.3,"4":285.7,"5":357.1,"6":428.6,"7":500.0} %}
+              {% set rates = rates_raw | from_json if rates_raw not in ['unknown','unavailable',''] else defaults %}
+              {% set level_key = intensity | string %}
+              {% set rate_ml_h = (rates[level_key] | default(intensity * 500.0 / 7.0)) | float %}
+              {% set rate_ml_per_min = rate_ml_h / 60.0 %}
+              {{ (current + rate_ml_per_min) | round(1) }}
+            {% else %}
+              {{ current }}
+            {% endif %}
+          {% endif %}
+
+      # ──────────────────────────────────────────────────────────────────────────
+      #  УРОВЕНЬ ВОДЫ В БАКЕ (%)
+      # ──────────────────────────────────────────────────────────────────────────
+      - name: "Humidifier Water Level"
+        unique_id: humidifier_water_level_pct
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:water-percent
+        state: >
+          {% set capacity = states('input_number.humidifier_tank_capacity_ml') | float(5000) %}
+          {% set consumed = states('sensor.humidifier_water_consumed') | float(0) %}
+          {{ [0, (((capacity - consumed) / capacity) * 100)] | max | round(0) }}
+        attributes:
+          capacity_ml: "{{ states('input_number.humidifier_tank_capacity_ml') | float(5000) | round(0) }}"
+          consumed_ml: "{{ states('sensor.humidifier_water_consumed') | float(0) | round(0) }}"
+          remaining_ml: >
+            {% set capacity = states('input_number.humidifier_tank_capacity_ml') | float(5000) %}
+            {% set consumed = states('sensor.humidifier_water_consumed') | float(0) %}
+            {{ [0, (capacity - consumed)] | max | round(0) }}
+          hours_remaining: >
+            {% set capacity = states('input_number.humidifier_tank_capacity_ml') | float(5000) %}
+            {% set consumed = states('sensor.humidifier_water_consumed') | float(0) %}
+            {% set intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
+            {% if intensity > 0 %}
+              {% set rates_raw = states('input_text.humidifier_consumption_rates') %}
+              {% set defaults = {"1":71.4,"2":142.9,"3":214.3,"4":285.7,"5":357.1,"6":428.6,"7":500.0} %}
+              {% set rates = rates_raw | from_json if rates_raw not in ['unknown','unavailable',''] else defaults %}
+              {% set rate = (rates[intensity | string] | default(intensity * 500.0 / 7.0)) | float %}
+              {{ (([0, (capacity - consumed)] | max) / rate) | round(1) }}
+            {% else %}
+              unknown
+            {% endif %}
+          calibration_cycles: "{{ states('input_number.humidifier_calibration_cycles') | int(0) }}"
+          consumption_rates: "{{ states('input_text.humidifier_consumption_rates') }}"
+          last_calibration: "{{ states('input_text.humidifier_last_calibration') }}"
+          level_hours: >
+            {{ {
+              "1": states('sensor.humidifier_level_1_hours') | float(0),
+              "2": states('sensor.humidifier_level_2_hours') | float(0),
+              "3": states('sensor.humidifier_level_3_hours') | float(0),
+              "4": states('sensor.humidifier_level_4_hours') | float(0),
+              "5": states('sensor.humidifier_level_5_hours') | float(0),
+              "6": states('sensor.humidifier_level_6_hours') | float(0),
+              "7": states('sensor.humidifier_level_7_hours') | float(0)
+            } }}
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  SCRIPTS
@@ -104,13 +529,11 @@ script:
     alias: "Возобновить авто‑управление увлажнителем"
     mode: single
     sequence:
-      # Включить основную автоматику и детектор ручного управления
       - service: automation.turn_on
         target:
-          entity_id:
+           entity_id:
             - automation.humidity_control_main
-            - automation.humidity_manual_override_detector
-      # Далее device_setup сработает сам по триггеру "control_main → on"
+            - automation.humidity_mode_enforcer
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
@@ -127,51 +550,37 @@ automation:
     initial_state: true
 
     trigger:
-      # Входим в AUTO: автоматизация humidity_control_main включена
       - platform: state
         entity_id: automation.humidity_control_main
         to: "on"
-      # Восстановление после restart Home Assistant
       - platform: homeassistant
         event: start
 
-
     condition:
-      # Срабатывать только если control_main включена (AUTO режим активен)
       - condition: state
         entity_id: automation.humidity_control_main
         state: "on"
 
     action:
-      # Отключаем детектор, чтобы наши действия не считались ручными
-      - service: automation.turn_off
-        target:
-          entity_id: automation.humidity_manual_override_detector
-
-      # Включить питание
       - service: switch.turn_on
         target:
           entity_id: switch.humidifier_puh_9105_puh_2709_power
 
-      # Подождать загрузки устройства
       - delay:
           seconds: 2
 
-      # Режим "home" (ручное управление снаружи, автоматическое из HA)
       - service: humidifier.set_mode
         target:
           entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         data:
           mode: "home"
 
-      # Установить целевую влажность на максимум (режим Intensity следует глобальному humidity!)
       - service: humidifier.set_humidity
         target:
           entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         data:
           humidity: 75
 
-      # Настроить переключатели
       - service: switch.turn_off
         target:
           entity_id:
@@ -184,17 +593,84 @@ automation:
             - switch.humidifier_puh_9105_puh_2709_ioniser
             - switch.humidifier_puh_9105_puh_2709_warm_stream
 
-      # Подождать, чтобы MQTT‑состояния стабилизировались
-      - delay:
-          seconds: 20
+  # ══════════════════════════════════════════════════════════════════════════
+  #  КОНТРОЛЬ РЕЖИМА
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: humidity_mode_enforcer
+    alias: humidity_mode_enforcer
+    description: "Гарантирует режим 'home' при активной автоматизации"
+    mode: single
+    max_exceeded: silent
+    initial_state: true
 
-      # Включить детектор обратно
-      - service: automation.turn_on
+    trigger:
+      - platform: state
+        entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+        attribute: mode
+        id: "mode_changed"
+      - platform: state
+        entity_id: switch.humidifier_puh_9105_puh_2709_power
+        to: "on"
+        for:
+          seconds: 2
+        id: "power_on"
+      - platform: time_pattern
+        minutes: "/2"
+        id: "periodic"
+      - platform: homeassistant
+        event: start
+        id: "ha_start"
+
+    condition:
+      - condition: state
+        entity_id: automation.humidity_control_main
+        state: "on"
+      - condition: state
+        entity_id: switch.humidifier_puh_9105_puh_2709_power
+        state: "on"
+      - condition: template
+        value_template: >
+          {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
+
+    action:
+      - delay:
+          seconds: 1
+
+      - service: humidifier.set_mode
         target:
-          entity_id: automation.humidity_manual_override_detector
+          entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+        data:
+          mode: "home"
+
+      - delay:
+          seconds: 2
+
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'power_on' }}"
+        then:
+          - service: humidifier.set_mode
+            target:
+              entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+            data:
+              mode: "home"
+          - delay:
+              seconds: 2
+
+      - service: humidifier.set_humidity
+        target:
+          entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+        data:
+          humidity: 75
+
+      - service: number.set_value
+        target:
+          entity_id: number.humidifier_puh_9105_puh_2709_intensity
+        data:
+          value: "{{ states('sensor.recommended_intensity') | int(3) }}"
 
   # ══════════════════════════════════════════════════════════════════════════
-  #  ОСНОВНАЯ АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ (AUTO)
+  #  ОСНОВНАЯ АВТОМАТИЗАЦИЯ УПРАВЛЕНИЯ
   # ══════════════════════════════════════════════════════════════════════════
   - id: humidity_control_main
     alias: humidity_control_main
@@ -203,79 +679,73 @@ automation:
     initial_state: true
 
     trigger:
-      # Проверка каждые 5 минут
-      - platform: time_pattern
-        minutes: "/5"
-      # Реакция на изменения влажности
       - platform: state
-        entity_id: sensor.sensor_eva_humidity
-      # Реакция на изменения комнатной температуры
-      - platform: state
-        entity_id: sensor.sensor_eva_temperature
-      # Реакция на изменения уличной температуры
-      - platform: state
-        entity_id: weather.forecast_home_assistant
-        attribute: temperature
+        entity_id: sensor.recommended_intensity
 
     condition:
-      # Устройство без критических ошибок
       - condition: template
         value_template: >
           {% set err = states('sensor.humidifier_puh_9105_puh_2709_error') %}
           {{ err in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'] }}
 
     action:
+      # Проверка режима
+      - if:
+          - condition: state
+            entity_id: switch.humidifier_puh_9105_puh_2709_power
+            state: "on"
+          - condition: template
+            value_template: >
+              {{ state_attr('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'mode') != 'home' }}
+        then:
+          - service: humidifier.set_mode
+            target:
+              entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+            data:
+              mode: "home"
+          - delay:
+              seconds: 3
+
+      # Переменные
       - variables:
           recommended: "{{ states('sensor.recommended_intensity') | int(0) }}"
           current: "{{ states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) }}"
 
-      # ────────────────────────────────────────────────────────────────────────
-      # УПРАВЛЕНИЕ ПИТАНИЕМ
-      # ────────────────────────────────────────────────────────────────────────
+      # Управление питанием
       - choose:
-          # recommended = 0 → выключить питание, если оно включено
           - conditions:
               - condition: template
                 value_template: "{{ recommended == 0 }}"
               - condition: template
                 value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') == 'on' }}"
             sequence:
-              - service: automation.turn_off
-                target:
-                  entity_id: automation.humidity_manual_override_detector
               - service: switch.turn_off
                 target:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
               - delay:
                   seconds: 2
-              - service: automation.turn_on
-                target:
-                  entity_id: automation.humidity_manual_override_detector
 
-          # recommended > 0 и питание не ON → включить питание
           - conditions:
               - condition: template
                 value_template: "{{ recommended > 0 }}"
               - condition: template
                 value_template: "{{ states('switch.humidifier_puh_9105_puh_2709_power') != 'on' }}"
             sequence:
-              - service: automation.turn_off
-                target:
-                  entity_id: automation.humidity_manual_override_detector
               - service: switch.turn_on
                 target:
                   entity_id: switch.humidifier_puh_9105_puh_2709_power
               - delay:
-                  seconds: 2
-              - service: automation.turn_on
+                  seconds: 3
+              - service: humidifier.set_mode
                 target:
-                  entity_id: automation.humidity_manual_override_detector
+                  entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+                data:
+                  mode: "home"
+              - delay:
+                  seconds: 2
 
-      # ────────────────────────────────────────────────────────────────────────
-      # ПРОВЕРКА ГОТОВНОСТИ УСТРОЙСТВА
-      # ────────────────────────────────────────────────────────────────────────
+      # Проверка готовности
       - choose:
-          # Если питание OFF или режим не home → остановиться
           - conditions:
               - condition: or
                 conditions:
@@ -288,7 +758,6 @@ automation:
             sequence:
               - stop: "Устройство выключено или режим не home"
 
-          # Если бак пуст → остановиться (уведомление отправит другая автоматика)
           - conditions:
               - condition: state
                 entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
@@ -296,22 +765,13 @@ automation:
             sequence:
               - stop: "Нет воды в баке"
 
-      # ────────────────────────────────────────────────────────────────────────
-      # УПРАВЛЕНИЕ ИНТЕНСИВНОСТЬЮ
-      # ────────────────────────────────────────────────────────────────────────
-      # Ставим интенсивность только если она реально изменилась
+      # Управление интенсивностью
       - condition: template
         value_template: "{{ recommended != current }}"
 
-      # И не чаще одного раза в 5 минут
       - condition: template
         value_template: >
-          {{ (now() - states.number.humidifier_puh_9105_puh_2709_intensity.last_changed).total_seconds() > 300 }}
-
-      # Отключить детектор, чтобы не поймать свои же действия
-      - service: automation.turn_off
-        target:
-          entity_id: automation.humidity_manual_override_detector
+          {{ (now() - states.number.humidifier_puh_9105_puh_2709_intensity.last_changed).total_seconds() > 30 }}
 
       - service: number.set_value
         target:
@@ -319,65 +779,122 @@ automation:
         data:
           value: "{{ recommended }}"
 
-      # Подождать MQTT‑обновления
       - delay:
-          seconds: 20
-
-      # Включить детектор обратно
-      - service: automation.turn_on
-        target:
-          entity_id: automation.humidity_manual_override_detector
+          seconds: 3
 
   # ══════════════════════════════════════════════════════════════════════════
-  #  ДЕТЕКТОР РУЧНОГО УПРАВЛЕНИЯ (MANUAL override)
+  #  КАЛИБРОВКА РАСХОДА PER-LEVEL (при опустошении бака)
+  #  Данные берутся из history_stats сенсоров (часы на каждом уровне)
   # ══════════════════════════════════════════════════════════════════════════
-  - id: humidity_manual_override_detector
-    alias: humidity_manual_override_detector
-    mode: restart
+  - id: humidifier_calibrate_rates
+    alias: humidifier_calibrate_rates
+    description: "Автокалибровка расхода на каждом уровне интенсивности (history_stats)"
+    mode: single
     initial_state: true
 
     trigger:
-      # Любое изменение ключевых сущностей управления
       - platform: state
-        entity_id:
-          - number.humidifier_puh_9105_puh_2709_intensity
-          - switch.humidifier_puh_9105_puh_2709_power
-          - switch.humidifier_puh_9105_puh_2709_warm_stream
-          - switch.humidifier_puh_9105_puh_2709_backlight
-          - switch.humidifier_puh_9105_puh_2709_ioniser
-          - switch.humidifier_puh_9105_puh_2709_sound
-        for:
-          seconds: 2
-
-      - platform: state
-        entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
-        attribute: mode
-        for:
-          seconds: 2
+        entity_id: sensor.humidifier_puh_9105_puh_2709_error
+        to:
+          - "low_water"
+          - "01"
 
     condition:
-      # Значение действительно изменилось
-      - condition: template
-        value_template: >
-          {{ trigger.from_state is not none and trigger.to_state is not none
-             and trigger.from_state.state != trigger.to_state.state }}
-
-      # Не инициализация entity
-      - condition: template
-        value_template: >
-          {{ trigger.from_state.state not in ['unavailable', 'unknown', 'none'] }}
-
-      # Не срабатывать, если сейчас выполняется control_main или device_setup
-      - condition: template
-        value_template: >
-          {{ state_attr('automation.humidity_control_main', 'current') | int(0) == 0 and
-             state_attr('automation.humidity_device_setup', 'current') | int(0) == 0 }}
+      # Калибруем только если накоплено > 1 литра (защита от ложных срабатываний)
+      - condition: numeric_state
+        entity_id: sensor.humidifier_water_consumed
+        above: 1000
 
     action:
-      # Переход в MANUAL: отключаем только основную автоматику управления устройством
-      - service: automation.turn_off
+      - variables:
+          capacity: "{{ states('input_number.humidifier_tank_capacity_ml') | float(5000) }}"
+          model_consumed: "{{ states('sensor.humidifier_water_consumed') | float(0) }}"
+          cycles: "{{ states('input_number.humidifier_calibration_cycles') | int(0) }}"
+          capped_cycles: "{{ [cycles, 10] | min }}"
+          correction: "{{ (capacity / model_consumed) | round(4) if model_consumed > 0 else 1.0 }}"
+          rates_raw: "{{ states('input_text.humidifier_consumption_rates') }}"
+          default_rates: {"1":71.4,"2":142.9,"3":214.3,"4":285.7,"5":357.1,"6":428.6,"7":500.0}
+          # Часы на каждом уровне из history_stats (нативный HA)
+          level_hours: >
+            {%- set h = {
+              "1": states('sensor.humidifier_level_1_hours') | float(0),
+              "2": states('sensor.humidifier_level_2_hours') | float(0),
+              "3": states('sensor.humidifier_level_3_hours') | float(0),
+              "4": states('sensor.humidifier_level_4_hours') | float(0),
+              "5": states('sensor.humidifier_level_5_hours') | float(0),
+              "6": states('sensor.humidifier_level_6_hours') | float(0),
+              "7": states('sensor.humidifier_level_7_hours') | float(0)
+            } -%}
+            {{ h | to_json }}
+          # Новые ставки: EMA-коррекция для уровней с >6 мин использования
+          new_rates: >
+            {%- set r = rates_raw | from_json if rates_raw not in ['unknown','unavailable',''] else default_rates -%}
+            {%- set corr = (capacity / model_consumed) if model_consumed | float > 0 else 1.0 -%}
+            {%- set cc = [cycles | int, 10] | min -%}
+            {%- set h = {
+              "1": states('sensor.humidifier_level_1_hours') | float(0),
+              "2": states('sensor.humidifier_level_2_hours') | float(0),
+              "3": states('sensor.humidifier_level_3_hours') | float(0),
+              "4": states('sensor.humidifier_level_4_hours') | float(0),
+              "5": states('sensor.humidifier_level_5_hours') | float(0),
+              "6": states('sensor.humidifier_level_6_hours') | float(0),
+              "7": states('sensor.humidifier_level_7_hours') | float(0)
+            } -%}
+            {%- set ns = namespace(result={}) -%}
+            {%- for k in ['1','2','3','4','5','6','7'] -%}
+              {%- set old_rate = r[k] | default(k | int * 500.0 / 7.0) | float -%}
+              {%- set hrs = h[k] | float(0) -%}
+              {%- if hrs > 0.1 -%}
+                {%- set corrected = old_rate * corr -%}
+                {%- set blended = ((old_rate * cc + corrected) / (cc + 1)) | round(1) -%}
+                {%- set ns.result = dict(ns.result, **{k: blended}) -%}
+              {%- else -%}
+                {%- set ns.result = dict(ns.result, **{k: old_rate | round(1)}) -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ ns.result | to_json }}
+
+      - service: input_text.set_value
         target:
-          entity_id: automation.humidity_control_main
+          entity_id: input_text.humidifier_consumption_rates
+        data:
+          value: "{{ new_rates }}"
+
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.humidifier_calibration_cycles
+        data:
+          value: "{{ capped_cycles + 1 }}"
+
+      # Сброс цикла — history_stats начнёт считать заново
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.humidifier_cycle_start
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      # Сохраняем результат калибровки
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.humidifier_last_calibration
+        data:
+          value: >
+            {{ {"correction": correction | float | round(4),
+                "model_ml": model_consumed | float | round(0),
+                "cycle": (capped_cycles + 1) | int,
+                "level_hours": level_hours | from_json,
+                "timestamp": now().isoformat()} | to_json }}
+
+      - service: notify.zapgroup
+        data:
+          title: "📊 Калибровка расхода увлажнителя"
+          message: >
+            Бак опустошён ({{ capacity | round(0) }} мл).
+            Модель насчитала: {{ model_consumed | round(0) }} мл.
+            Коррекция: ×{{ correction }}.
+            Цикл: {{ capped_cycles + 1 }}.
+            Часы по уровням: {{ level_hours }}.
+            Новые ставки (мл/ч): {{ new_rates }}.
 
   # ══════════════════════════════════════════════════════════════════════════
   #  УВЕДОМЛЕНИЕ: ОШИБКА УСТРОЙСТВА
@@ -392,14 +909,20 @@ automation:
         entity_id: sensor.humidifier_puh_9105_puh_2709_error
 
     condition:
+      # Новое состояние — ошибка
       - condition: template
         value_template: >
           {% set err = trigger.to_state.state %}
           {{ err not in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'] }}
+      # Предыдущее состояние — НЕ ошибка (т.е. это переход в ошибку, а не повтор)
+      - condition: template
+        value_template: >
+          {% set prev = trigger.from_state.state %}
+          {{ prev in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'] }}
 
     action:
       - variables:
-          error_code: "{{ states('sensor.humidifier_puh_9105_puh_2709_error') }}"
+          error_code: "{{ trigger.to_state.state }}"
           error_title: >
             {% if error_code in ['01', 'low_water'] %}
               💧 Мало воды в увлажнителе
@@ -418,20 +941,12 @@ automation:
               Наполните бак чистой водой.
             {% elif error_code in ['03', 'replace_filter'] %}
               Фильтр загрязнён и требует замены.
-              Установите новый фильтр для продолжения работы.
-
-              Управление приостановлено до замены фильтра.
             {% elif error_code in ['04', 'maximum_schedules'] %}
-              Достигнуто максимальное количество настроенных расписаний.
-              Удалите неиспользуемые расписания через приложение.
+              Достигнуто максимальное количество расписаний.
             {% elif error_code in ['05', 'clean_tank'] %}
-              Бак требует очистки от накипи и бактерий.
-              Выполните очистку согласно инструкции.
-
-              Управление приостановлено до очистки бака.
+              Бак требует очистки от накипи.
             {% else %}
               Код ошибки: {{ error_code }}
-              Проверьте устройство и обратитесь к инструкции.
             {% endif %}
 
       - service: notify.zapgroup
