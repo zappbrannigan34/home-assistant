@@ -1,0 +1,513 @@
+# package: ventilation_zap_left
+# Version: 1.0.0
+# Last Updated: 2025-03-25
+# Description: Trend-based CO2 ventilation control for Drivent V2 (zap_left window)
+#
+# АЛГОРИТМ: Зонное управление по тренду CO2 (аналог Drivent Air).
+# НЕ PID — привод двигается только когда тренд подтверждает необходимость.
+# Оценка каждые 5 минут, шаг 5% или 2%, deadband ±50 ppm.
+#
+# РЕСУРС ПРИВОДА: WindowMaster рейтинг ~10 000 циклов.
+# С тренд-фильтром: ~20-40 реальных движений/день → 250-500 дней.
+# Drivent V2 магнитный датчик надёжнее V1 — реальный ресурс выше.
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT NUMBERS (настройки регулирования)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_number:
+  ventilation_target_co2:
+    name: "Ventilation Target CO2"
+    min: 400
+    max: 1000
+    step: 50
+    unit_of_measurement: "ppm"
+    icon: mdi:molecule-co2
+    mode: box
+
+  ventilation_min_position:
+    name: "Ventilation Min Position"
+    min: 0
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:arrow-collapse-down
+    mode: box
+
+  ventilation_max_position:
+    name: "Ventilation Max Position"
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:arrow-collapse-up
+    mode: box
+
+  ventilation_min_outdoor_temp:
+    name: "Ventilation Min Outdoor Temp"
+    min: -30
+    max: 10
+    step: 1
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-alert
+    mode: box
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  TEMPLATE SENSORS
+# ──────────────────────────────────────────────────────────────────────────────
+
+template:
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 1: ТРЕНД CO2 (замер каждую минуту, кольцевой буфер 5 значений)
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "CO2 Trend"
+        unique_id: ventilation_co2_trend
+        icon: mdi:trending-up
+        state: >
+          {% set current = states('sensor.sensor_zap_co2') | float(none) %}
+          {% if current is none %}
+            {{ this.state | default('unknown') }}
+          {% else %}
+            {# Среднее трёх старейших значений из буфера (h3, h4, h5) #}
+            {% set h3 = this.attributes.h3 | default(current) | float(current) %}
+            {% set h4 = this.attributes.h4 | default(current) | float(current) %}
+            {% set h5 = this.attributes.h5 | default(current) | float(current) %}
+            {% set avg_old = (h3 + h4 + h5) / 3 %}
+            {% set diff = current - avg_old %}
+            {# Порог тренда: 15 ppm за 3-5 минут #}
+            {% if diff > 15 %}
+              rising
+            {% elif diff < -15 %}
+              falling
+            {% else %}
+              stable
+            {% endif %}
+          {% endif %}
+        attributes:
+          # Кольцевой буфер: h1 = последний замер, h5 = самый старый
+          h1: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
+          h2: "{{ this.attributes.h1 | default(states('sensor.sensor_zap_co2')) | float(0) }}"
+          h3: "{{ this.attributes.h2 | default(states('sensor.sensor_zap_co2')) | float(0) }}"
+          h4: "{{ this.attributes.h3 | default(states('sensor.sensor_zap_co2')) | float(0) }}"
+          h5: "{{ this.attributes.h4 | default(states('sensor.sensor_zap_co2')) | float(0) }}"
+          current_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
+          avg_old: >
+            {% set h3 = this.attributes.h3 | default(0) | float(0) %}
+            {% set h4 = this.attributes.h4 | default(0) | float(0) %}
+            {% set h5 = this.attributes.h5 | default(0) | float(0) %}
+            {{ ((h3 + h4 + h5) / 3) | round(0) }}
+          diff: >
+            {% set current = states('sensor.sensor_zap_co2') | float(0) %}
+            {% set h3 = this.attributes.h3 | default(0) | float(0) %}
+            {% set h4 = this.attributes.h4 | default(0) | float(0) %}
+            {% set h5 = this.attributes.h5 | default(0) | float(0) %}
+            {{ (current - (h3 + h4 + h5) / 3) | round(0) }}
+
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 2: РЕКОМЕНДУЕМАЯ ПОЗИЦИЯ ОКНА (зонное управление по тренду)
+  #  Оценка каждые 5 минут — главный ограничитель частоты движений привода
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: state
+        entity_id: sensor.co2_trend
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Ventilation Recommended Position"
+        unique_id: ventilation_recommended_position
+        unit_of_measurement: "%"
+        icon: mdi:window-open-variant
+        availability: >
+          {{ has_value('sensor.sensor_zap_co2') and
+             has_value('sensor.co2_trend') and
+             has_value('cover.drivent_zap_left_driventokonnyi_privod') }}
+        state: >
+          {% set co2 = states('sensor.sensor_zap_co2') | float(650) %}
+          {% set trend = states('sensor.co2_trend') %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {% set current_pos = state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) %}
+          {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+          {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+
+          {# ═══════════════════════════════════════════════════════════════
+             ЗОННОЕ УПРАВЛЕНИЕ ПО ТРЕНДУ CO2
+             Аналог логики Drivent Air, адаптированный под HA
+             ═══════════════════════════════════════════════════════════════ #}
+
+          {% set step = 0 %}
+
+          {# --- ЗОНА 1: Сильное превышение (>target+150, напр. >800) --- #}
+          {% if co2 > target + 150 %}
+            {% if trend in ['rising', 'stable'] %}
+              {% set step = 5 %}
+            {% else %}
+              {# CO2 уже падает — не дёргаем #}
+              {% set step = 0 %}
+            {% endif %}
+
+          {# --- ЗОНА 2: Умеренное превышение (target+50 .. target+150) --- #}
+          {% elif co2 > target + 50 %}
+            {% if trend == 'rising' %}
+              {% set step = 2 %}
+            {% else %}
+              {% set step = 0 %}
+            {% endif %}
+
+          {# --- ЗОНА 3: Околоцелевая (target-50 .. target+50) — DEADBAND --- #}
+          {% elif co2 > target - 50 %}
+            {% if trend == 'rising' %}
+              {# Превентивно приоткрыть, пока CO2 не улетел #}
+              {% set step = 2 %}
+            {% else %}
+              {% set step = 0 %}
+            {% endif %}
+
+          {# --- ЗОНА 4: Ниже цели (target-150 .. target-50) --- #}
+          {% elif co2 > target - 150 %}
+            {% if trend == 'falling' %}
+              {% set step = -5 %}
+            {% else %}
+              {% set step = 0 %}
+            {% endif %}
+
+          {# --- ЗОНА 5: Значительно ниже цели (<target-150, напр. <500) --- #}
+          {% else %}
+            {% if trend in ['falling', 'stable'] %}
+              {% set step = -5 %}
+            {% else %}
+              {% set step = 0 %}
+            {% endif %}
+          {% endif %}
+
+          {# ═══════════════════════════════════════════════════════════════
+             АНТИОСЦИЛЛЯЦИЯ: если последние 4 рекомендации менялись ≥3 раз
+             в противоположных направлениях → держим текущее
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set h = [
+            this.attributes.s1 | default(0) | int,
+            this.attributes.s2 | default(0) | int,
+            this.attributes.s3 | default(0) | int,
+            this.attributes.s4 | default(0) | int
+          ] %}
+          {% set ns = namespace(sign_changes=0) %}
+          {% set signs = [] %}
+          {% for s in h %}
+            {% if s > 0 %}
+              {% set signs = signs + [1] %}
+            {% elif s < 0 %}
+              {% set signs = signs + [-1] %}
+            {% else %}
+              {% set signs = signs + [0] %}
+            {% endif %}
+          {% endfor %}
+          {% for i in range(1, signs | length) %}
+            {% if signs[i] != 0 and signs[i-1] != 0 and signs[i] != signs[i-1] %}
+              {% set ns.sign_changes = ns.sign_changes + 1 %}
+            {% endif %}
+          {% endfor %}
+          {% if ns.sign_changes >= 2 and step != 0 %}
+            {# Осцилляция обнаружена — не двигаемся #}
+            {% set step = 0 %}
+          {% endif %}
+
+          {# ═══════════════════════════════════════════════════════════════
+             РАСЧЁТ НОВОЙ ПОЗИЦИИ
+             ═══════════════════════════════════════════════════════════════ #}
+          {% set new_pos = current_pos + step %}
+
+          {# Clamp в пределах min/max #}
+          {% set new_pos = [new_pos, min_pos] | max %}
+          {% set new_pos = [new_pos, max_pos] | min %}
+
+          {{ new_pos | int }}
+        attributes:
+          co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
+          trend: "{{ states('sensor.co2_trend') }}"
+          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
+          current_position: "{{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) }}"
+          last_step: >
+            {% set co2 = states('sensor.sensor_zap_co2') | float(650) %}
+            {% set trend = states('sensor.co2_trend') %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% if co2 > target + 150 %}
+              {% if trend in ['rising', 'stable'] %}5{% else %}0{% endif %}
+            {% elif co2 > target + 50 %}
+              {% if trend == 'rising' %}2{% else %}0{% endif %}
+            {% elif co2 > target - 50 %}
+              {% if trend == 'rising' %}2{% else %}0{% endif %}
+            {% elif co2 > target - 150 %}
+              {% if trend == 'falling' %}-5{% else %}0{% endif %}
+            {% else %}
+              {% if trend in ['falling', 'stable'] %}-5{% else %}0{% endif %}
+            {% endif %}
+          # Кольцевой буфер последних 4 шагов (для антиосцилляции)
+          s1: >
+            {% set co2 = states('sensor.sensor_zap_co2') | float(650) %}
+            {% set trend = states('sensor.co2_trend') %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% if co2 > target + 150 %}
+              {% if trend in ['rising', 'stable'] %}5{% else %}0{% endif %}
+            {% elif co2 > target + 50 %}
+              {% if trend == 'rising' %}2{% else %}0{% endif %}
+            {% elif co2 > target - 50 %}
+              {% if trend == 'rising' %}2{% else %}0{% endif %}
+            {% elif co2 > target - 150 %}
+              {% if trend == 'falling' %}-5{% else %}0{% endif %}
+            {% else %}
+              {% if trend in ['falling', 'stable'] %}-5{% else %}0{% endif %}
+            {% endif %}
+          s2: "{{ this.attributes.s1 | default(0) | int }}"
+          s3: "{{ this.attributes.s2 | default(0) | int }}"
+          s4: "{{ this.attributes.s3 | default(0) | int }}"
+          oscillation_detected: >
+            {% set h = [
+              this.attributes.s1 | default(0) | int,
+              this.attributes.s2 | default(0) | int,
+              this.attributes.s3 | default(0) | int,
+              this.attributes.s4 | default(0) | int
+            ] %}
+            {% set ns = namespace(changes=0) %}
+            {% set signs = [] %}
+            {% for s in h %}
+              {% if s > 0 %}{% set signs = signs + [1] %}
+              {% elif s < 0 %}{% set signs = signs + [-1] %}
+              {% else %}{% set signs = signs + [0] %}{% endif %}
+            {% endfor %}
+            {% for i in range(1, signs | length) %}
+              {% if signs[i] != 0 and signs[i-1] != 0 and signs[i] != signs[i-1] %}
+                {% set ns.changes = ns.changes + 1 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.changes >= 2 }}
+
+      # ──────────────────────────────────────────────────────────────────────
+      #  ОШИБКА CO2 (для дашборда и диагностики)
+      # ──────────────────────────────────────────────────────────────────────
+      - name: "Ventilation CO2 Error"
+        unique_id: ventilation_co2_error
+        unit_of_measurement: "ppm"
+        state_class: measurement
+        icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.sensor_zap_co2') }}
+        state: >
+          {% set co2 = states('sensor.sensor_zap_co2') | float(650) %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {{ (target - co2) | round(0) }}
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  AUTOMATIONS
+# ──────────────────────────────────────────────────────────────────────────────
+
+automation:
+  # ══════════════════════════════════════════════════════════════════════════
+  #  ОСНОВНОЕ УПРАВЛЕНИЕ: применить рекомендуемую позицию к приводу
+  #  Rate limit: не чаще 1 движения в час
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Управление вентиляцией по CO2"
+    alias: ventilation_control_main
+    mode: single
+    max_exceeded: silent
+    initial_state: true
+
+    trigger:
+      - platform: state
+        entity_id: sensor.ventilation_recommended_position
+
+    condition:
+      # Позиция реально изменилась
+      - condition: template
+        value_template: >
+          {% set recommended = states('sensor.ventilation_recommended_position') | int(-1) %}
+          {% set current = state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) %}
+          {{ recommended >= 0 and recommended != current }}
+
+      # Rate limit: минимум 1 час между движениями привода
+      - condition: template
+        value_template: >
+          {% set last = states.cover.drivent_zap_left_driventokonnyi_privod.last_changed %}
+          {{ (now() - last).total_seconds() > 3600 }}
+
+      # Нет активных ошибок привода
+      - condition: state
+        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
+        state: "off"
+
+      # CO2 сенсор доступен
+      - condition: template
+        value_template: >
+          {{ has_value('sensor.sensor_zap_co2') }}
+
+    action:
+      - variables:
+          recommended: "{{ states('sensor.ventilation_recommended_position') | int(0) }}"
+
+      - service: cover.set_cover_position
+        target:
+          entity_id: cover.drivent_zap_left_driventokonnyi_privod
+        data:
+          position: "{{ recommended }}"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  АВАРИЙНОЕ ЗАКРЫТИЕ: температура, дождь, перегрузка, недоступность CO2
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Аварийное закрытие окна"
+    alias: ventilation_safety_close
+    mode: single
+    max_exceeded: silent
+    initial_state: true
+
+    trigger:
+      # Температура на улице упала ниже минимума
+      - platform: template
+        value_template: >
+          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {{ outdoor < min_temp }}
+        id: "cold"
+
+      # Перегрузка привода
+      - platform: state
+        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
+        to: "on"
+        id: "overload"
+
+      # CO2 сенсор стал unavailable (потеря связи)
+      - platform: state
+        entity_id: sensor.sensor_zap_co2
+        to: "unavailable"
+        for:
+          minutes: 2
+        id: "co2_lost"
+
+      # Периодическая проверка (каждые 10 мин)
+      - platform: time_pattern
+        minutes: "/10"
+        id: "periodic"
+
+    condition:
+      # Окно реально открыто
+      - condition: template
+        value_template: >
+          {{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) > 0 }}
+
+      # Хотя бы одно условие для закрытия выполнено
+      - condition: or
+        conditions:
+          # Слишком холодно на улице
+          - condition: template
+            value_template: >
+              {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+              {{ outdoor < min_temp }}
+          # Перегрузка привода
+          - condition: state
+            entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
+            state: "on"
+          # CO2 сенсор недоступен
+          - condition: state
+            entity_id: sensor.sensor_zap_co2
+            state: "unavailable"
+
+    action:
+      - variables:
+          reason: >
+            {% if is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'on') %}
+              overload
+            {% elif is_state('sensor.sensor_zap_co2', 'unavailable') %}
+              co2_sensor_lost
+            {% else %}
+              cold_outdoor
+            {% endif %}
+
+      - service: cover.close_cover
+        target:
+          entity_id: cover.drivent_zap_left_driventokonnyi_privod
+
+      - service: notify.zapgroup
+        data:
+          title: "🪟 Окно закрыто (безопасность)"
+          message: >
+            Причина: {{ reason }}.
+            {% if reason == 'cold_outdoor' %}
+              Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
+              (мин: {{ states('input_number.ventilation_min_outdoor_temp') }}°C).
+            {% elif reason == 'overload' %}
+              Привод обнаружил перегрузку. Проверьте окно.
+            {% elif reason == 'co2_sensor_lost' %}
+              Датчик CO2 недоступен. Окно закрыто в целях безопасности.
+            {% endif %}
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  КООРДИНАЦИЯ С РАДИАТОРОМ
+  #  При открытии окна > 5%: сигнал радиатору (open window mode)
+  #  При закрытии < 3%: снять сигнал
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Координация радиатора с окном"
+    alias: ventilation_radiator_sync
+    mode: single
+    max_exceeded: silent
+    initial_state: true
+
+    trigger:
+      - platform: state
+        entity_id: cover.drivent_zap_left_driventokonnyi_privod
+        attribute: current_position
+
+    action:
+      - variables:
+          position: "{{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) }}"
+          radiator_state: "{{ states('switch.radiator_left_zap_open_window') }}"
+
+      - choose:
+          # Окно открыто > 5% → включить режим открытого окна на радиаторе
+          - conditions:
+              - condition: template
+                value_template: "{{ position > 5 and radiator_state != 'on' }}"
+            sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.radiator_left_zap_open_window
+
+          # Окно закрыто < 3% → выключить режим открытого окна
+          - conditions:
+              - condition: template
+                value_template: "{{ position < 3 and radiator_state == 'on' }}"
+            sequence:
+              - service: switch.turn_off
+                target:
+                  entity_id: switch.radiator_left_zap_open_window
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  УВЕДОМЛЕНИЕ ОБ ОШИБКЕ ПРИВОДА
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Ошибка привода окна"
+    alias: ventilation_device_error
+    mode: single
+    initial_state: true
+
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
+        to: "on"
+
+    action:
+      - service: notify.zapgroup
+        data:
+          title: "⚠️ Перегрузка привода Drivent (zap_left)"
+          message: >
+            Привод обнаружил перегрузку. Проверьте:
+            - не зажато ли что-то в окне
+            - открывается ли окно без заеданий
+            - не заблокирована ли ручка
+
+            Текущий CO2: {{ states('sensor.sensor_zap_co2') }} ppm
+            Позиция окна: {{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') }}%

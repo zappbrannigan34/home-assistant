@@ -1,5 +1,5 @@
 views:
-  - title: Humidity Control
+  - title: Ventilation Control
     type: custom:grid-layout
     layout:
       grid-template-columns: 2fr 1fr
@@ -15,9 +15,9 @@ views:
       - type: custom:plotly-graph
         # ENTITIES FIRST — $fn stores vars that layout reads
         entities:
-          # 1. Current Humidity (y1) — stores min/max in vars
-          - entity: sensor.sensor_eva_humidity
-            name: Humidity
+          # 1. CO2 (y1) — stores min/max in vars
+          - entity: sensor.sensor_zap_co2
+            name: CO2
             yaxis: y
             filters:
               - sliding_window_moving_average:
@@ -27,24 +27,24 @@ views:
                   ({ys, vars}) => {
                     const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
                     if (nums.length > 0) {
-                      vars.hum_min = Math.min(...nums);
-                      vars.hum_max = Math.max(...nums);
+                      vars.co2_min = Math.min(...nums);
+                      vars.co2_max = Math.max(...nums);
                     } else {
-                      vars.hum_min = 30;
-                      vars.hum_max = 50;
+                      vars.co2_min = 400;
+                      vars.co2_max = 800;
                     }
                     return null;
                   }
             line:
-              color: '#2196F3'
+              color: '#4CAF50'
               width: 2
               shape: spline
               smoothing: 1
             connectgaps: true
             showlegend: true
 
-          # 2. Error (y2) — stores min/max in vars
-          - entity: sensor.humidity_error
+          # 2. CO2 Error (y2) — stores min/max in vars
+          - entity: sensor.ventilation_co2_error
             name: Error
             yaxis: y2
             filters:
@@ -58,8 +58,8 @@ views:
                       vars.err_min = Math.min(...nums);
                       vars.err_max = Math.max(...nums);
                     } else {
-                      vars.err_min = -5;
-                      vars.err_max = 5;
+                      vars.err_min = -100;
+                      vars.err_max = 100;
                     }
                     return null;
                   }
@@ -71,9 +71,10 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Intensity (y3) — step line
-          - entity: number.humidifier_puh_9105_puh_2709_intensity
-            name: Intensity
+          # 3. Window Position (y3) — step line
+          - entity: cover.drivent_zap_left_driventokonnyi_privod
+            attribute: current_position
+            name: Window
             yaxis: y3
             line:
               color: '#AB47BC'
@@ -86,14 +87,14 @@ views:
         layout:
           height: 600
           shapes:
-            # Target humidity line on y1
+            # Target CO2 line on y1
             - type: line
               xref: paper
               x0: 0
               x1: 1
               yref: y
-              y0: $ex parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40
-              y1: $ex parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40
+              y0: $ex parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650
+              y1: $ex parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650
               line:
                 color: '#FF9800'
                 width: 2
@@ -131,45 +132,47 @@ views:
                   step: hour
                   stepmode: backward
 
-          # y1: Humidity (%) — target всегда посередине, симметричный zoom
+          # y1: CO2 (ppm) — target всегда посередине, симметричный zoom
           #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
           yaxis:
-            title: Humidity (%)
+            title: CO2 (ppm)
             side: left
             fixedrange: true
             autorange: false
             range: |-
               $fn ({vars, hass}) => {
-                const target = parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40;
-                const hMin = vars.hum_min ?? target;
-                const hMax = vars.hum_max ?? target;
-                const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 2);
+                const target = parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650;
+                const cMin = vars.co2_min ?? target;
+                const cMax = vars.co2_max ?? target;
+                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), 30);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
               }
 
-          # y2: Error (%) — 0 всегда посередине = визуально совпадает с target на y1
+          # y2: Error (ppm) — 0 всегда посередине = визуально совпадает с target на y1
           yaxis2:
-            title: Error (%)
+            title: Error (ppm)
             side: right
             overlaying: "y"
             showgrid: false
             fixedrange: true
             range: |-
               $fn ({vars}) => {
-                const eMin = vars.err_min ?? -5;
-                const eMax = vars.err_max ?? 5;
-                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1);
+                const eMin = vars.err_min ?? -100;
+                const eMax = vars.err_max ?? 100;
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
                 const padded = maxErr * 1.15;
                 return [-padded, padded];
               }
 
-          # y3: Intensity (0-7) — hidden axis
+          # y3: Window Position (0-100%) — фиксированный, без зума
           yaxis3:
             visible: false
             overlaying: "y"
             fixedrange: true
-            range: [-0.5, 8]
+            range:
+              - 0
+              - 100
 
         defaults:
           xaxes:
@@ -187,111 +190,114 @@ views:
           grid-area: 1 / 1 / span 3 / 2
 
       # ----------------------------------------------------------------------
-      # Секция 2: Правая колонка
+      # Секция 2: Правая колонка — Gauges
       # ----------------------------------------------------------------------
       - type: grid
         columns: 3
         square: false
         cards:
           - type: gauge
-            entity: sensor.sensor_eva_humidity
-            name: Current
-            min: 0
-            max: 100
+            entity: sensor.sensor_zap_co2
+            name: CO2
+            min: 300
+            max: 1500
             segments:
-              - from: 0
-                color: '#db4437'
-              - from: 20
-                color: '#f4b400'
-              - from: 30
+              - from: 300
+                color: '#2196F3'
+              - from: 400
                 color: '#43a047'
-              - from: 60
+              - from: 600
                 color: '#f4b400'
-              - from: 70
+              - from: 800
+                color: '#ff9800'
+              - from: 1000
                 color: '#db4437'
             needle: true
 
           - type: gauge
-            entity: sensor.adaptive_target_humidity
+            entity: input_number.ventilation_target_co2
             name: Target
-            min: 0
-            max: 100
+            min: 300
+            max: 1500
             needle: true
             severity:
-              green: 30
+              green: 400
               yellow: 0
               red: 0
 
           - type: gauge
-            entity: sensor.humidifier_water_level
-            name: Water
+            entity: cover.drivent_zap_left_driventokonnyi_privod
+            attribute: current_position
+            name: Window
             unit: "%"
             min: 0
             max: 100
             segments:
               - from: 0
-                color: '#db4437'
-              - from: 10
-                color: '#f4b400'
-              - from: 25
+                color: '#9E9E9E'
+              - from: 1
                 color: '#43a047'
+              - from: 50
+                color: '#f4b400'
+              - from: 80
+                color: '#db4437'
             needle: true
         view_layout:
           grid-area: 1 / 2 / 2 / 3
 
+      # ----------------------------------------------------------------------
+      # Секция 3: Правая колонка — Diagnostics
+      # ----------------------------------------------------------------------
       - type: entities
         title: Diagnostics
         show_header_toggle: false
         state_color: true
         entities:
-          - entity: sensor.sensor_eva_temperature
-            name: Room Temp
+          - entity: sensor.sensor_zap_co2
+            name: CO2 Level
+          - entity: sensor.co2_trend
+            name: CO2 Trend
+            icon: mdi:trending-up
           - entity: weather.forecast_home_assistant
             attribute: temperature
             name: Outdoor Temp
             icon: mdi:thermometer
-          
-          - type: divider
-          
-          - entity: sensor.humidity_error
-            name: Error
-          - entity: sensor.recommended_intensity
-            name: Recommended Intensity
-            icon: mdi:gauge
-          - entity: number.humidifier_puh_9105_puh_2709_intensity
-            name: Intensity
-            icon: mdi:fan
-
-          - type: divider
-          
-          - entity: sensor.humidifier_water_level
-            name: Water Level
-            icon: mdi:water-percent
-          - type: attribute
-            entity: sensor.humidifier_water_level
-            attribute: hours_remaining
-            name: Time Remaining (h)
-            icon: mdi:clock-outline
-            suffix: h
-          - entity: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
-            name: Water Tank Empty
-          - entity: sensor.humidifier_puh_9105_puh_2709_error
-            name: Error Code
-          
-          - type: divider
-          
-          - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
-            name: Device Mode
 
           - type: divider
 
-          - entity: input_text.humidifier_consumption_rates
-            name: Calibrated Rates (ml/h)
-            icon: mdi:tune-vertical
-          - entity: input_datetime.humidifier_cycle_start
-            name: Cycle Start
-            icon: mdi:timer-outline
-          - entity: input_number.humidifier_calibration_cycles
-            name: Calibration Cycles
+          - entity: sensor.ventilation_co2_error
+            name: CO2 Error
+            icon: mdi:delta
+          - entity: sensor.ventilation_recommended_position
+            name: Recommended Position
+            icon: mdi:window-open-variant
+          - entity: cover.drivent_zap_left_driventokonnyi_privod
+            name: Window Position
+            icon: mdi:window-shutter
+
+          - type: divider
+
+          - entity: binary_sensor.drivent_zap_left_datchik_peregruzki
+            name: Overload Sensor
+          - entity: sensor.drivent_zap_left_datchik_dozhdia
+            name: Rain Sensor
+
+          - type: divider
+
+          - entity: switch.radiator_left_zap_open_window
+            name: Radiator Open Window
+          - entity: number.radiator_left_zap_open_window_temperature
+            name: Radiator OW Temp
+
+          - type: divider
+
+          - entity: input_number.ventilation_target_co2
+            name: Target CO2
+          - entity: input_number.ventilation_min_position
+            name: Min Position
+          - entity: input_number.ventilation_max_position
+            name: Max Position
+          - entity: input_number.ventilation_min_outdoor_temp
+            name: Min Outdoor Temp
         view_layout:
-          grid-area: 2 / 2 / 3 / 3
+          grid-area: 2 / 2 / 4 / 3

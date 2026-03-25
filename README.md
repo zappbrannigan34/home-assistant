@@ -10,6 +10,7 @@
 | Пакет | Описание | Документация |
 |-------|----------|--------------|
 | `humidity` | Управление увлажнителем Polaris PUH‑9105 (адаптивная цель по влажности, режимы AUTO/MANUAL). | [`packages/humidity/README.md`](packages/humidity/README.md) |
+| `ventilation` | Trend-based CO2 вентиляция через Drivent V2 (зонный алгоритм, защита ресурса привода). | [`packages/ventilation/README.md`](packages/ventilation/README.md) |
 
 > Новые пакеты добавляются в каталог `packages/` и в эту таблицу.
 
@@ -38,14 +39,18 @@
 home-assistant/
 ├── README.md                   # Общая информация о проекте
 ├── dashboards/
-│   └── humidity_dashboard.yaml # Дашборд управления увлажнителем
+│   ├── humidity_dashboard.yaml # Дашборд управления увлажнителем
+│   └── ventilation_dashboard.yaml # Дашборд вентиляции (CO2 + Drivent)
 ├── docs/
 │   ├── NAMING_CONVENTIONS.md   # Правила нейминга сущностей
 │   └── HUMIDITY_CHANGELOG.md   # История изменений пакета humidity
 └── packages/
-    └── humidity/
-        ├── humidity_control.yaml  # YAML‑пакет управления увлажнителем
-        └── README.md              # Подробная документация по пакету
+    ├── humidity/
+    │   ├── humidity_control.yaml  # YAML‑пакет управления увлажнителем
+    │   └── README.md              # Подробная документация по пакету
+    └── ventilation/
+        ├── ventilation_control.yaml  # YAML‑пакет управления окном по CO2
+        └── README.md                 # Подробная документация по пакету
 ```
 
 ---

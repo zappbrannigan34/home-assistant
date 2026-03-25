@@ -1,0 +1,7 @@
+packages/humidity/SESSION_CONTEXT.md
+
+# Secrets — tokens, passwords, server URLs
+.secrets.env
+.secrets.*
+*.secret
+secrets/
