@@ -1,14 +1,9 @@
 views:
-  - title: Ventilation Control
+  - title: Zap
     type: sidebar
     cards:
-      # ----------------------------------------------------------------------
-      # Секция 1: График (Plotly)
-      # ----------------------------------------------------------------------
       - type: custom:plotly-graph
-        # ENTITIES FIRST — $fn stores vars that layout reads
         entities:
-          # 1. CO2 (y1) — stores min/max in vars
           - entity: sensor.sensor_zap_co2
             name: CO2
             yaxis: y
@@ -36,7 +31,6 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 2. CO2 Error (y2) — stores min/max in vars
           - entity: sensor.ventilation_co2_error
             name: Error
             yaxis: y2
@@ -64,8 +58,7 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Window Position (y3) — step line
-          - entity: cover.drivent_zap_left_driventokonnyi_privod
+          - entity: cover.ventilation_zap_group
             attribute: current_position
             name: Window
             yaxis: y3
@@ -76,11 +69,9 @@ views:
             connectgaps: true
             showlegend: true
 
-        # LAYOUT — reads vars set by entities above
         layout:
           height: 600
           shapes:
-            # Target CO2 line on y1
             - type: line
               xref: paper
               x0: 0
@@ -92,7 +83,6 @@ views:
                 color: '#FF9800'
                 width: 2
                 dash: dot
-            # Zero error line on y2
             - type: line
               xref: paper
               x0: 0
@@ -124,9 +114,6 @@ views:
                   label: 24h
                   step: hour
                   stepmode: backward
-
-          # y1: CO2 (ppm) — target всегда посередине, симметричный zoom
-          #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
           yaxis:
             title: CO2 (ppm)
             side: left
@@ -141,8 +128,6 @@ views:
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
               }
-
-          # y2: Error (ppm) — 0 всегда посередине = визуально совпадает с target на y1
           yaxis2:
             title: Error (ppm)
             side: right
@@ -157,8 +142,6 @@ views:
                 const padded = maxErr * 1.15;
                 return [-padded, padded];
               }
-
-          # y3: Window Position (0-100%) — фиксированный, без зума
           yaxis3:
             visible: false
             overlaying: "y"
@@ -166,22 +149,17 @@ views:
             range:
               - 0
               - 100
-
         defaults:
           xaxes:
             fixedrange: true
           yaxes:
             fixedrange: true
-
         time_offset: 5m
         hours_to_show: 0.25
         refresh_interval: 10
         autorange_after_scroll: false
         disable_pinch_to_zoom: true
 
-      # ----------------------------------------------------------------------
-      # Секция 2: Gauges (sidebar)
-      # ----------------------------------------------------------------------
       - type: grid
         columns: 3
         square: false
@@ -218,7 +196,269 @@ views:
               red: 0
 
           - type: gauge
-            entity: cover.drivent_zap_left_driventokonnyi_privod
+            entity: cover.ventilation_zap_group
+            attribute: current_position
+            name: Window Group
+            unit: "%"
+            min: 0
+            max: 100
+            segments:
+              - from: 0
+                color: '#9E9E9E'
+              - from: 1
+                color: '#43a047'
+              - from: 50
+                color: '#f4b400'
+              - from: 80
+                color: '#db4437'
+            needle: true
+
+      - type: entities
+        title: Zap Diagnostics
+        show_header_toggle: false
+        state_color: true
+        view_layout:
+          position: sidebar
+        entities:
+          - entity: sensor.sensor_zap_co2
+            name: CO2 Level
+          - entity: sensor.co2_trend
+            name: CO2 Trend
+          - entity: weather.forecast_home_assistant
+            attribute: temperature
+            name: Outdoor Temp
+
+          - type: divider
+
+          - entity: sensor.ventilation_co2_error
+            name: CO2 Error
+          - entity: sensor.ventilation_recommended_position
+            name: Recommended Position
+          - entity: cover.ventilation_zap_group
+            name: Window Group
+          - entity: cover.drivent_zap_left_driventokonnyi_privod
+            name: Zap Left Window
+          - entity: cover.drivent_zap_back_driventokonnyi_privod
+            name: Zap Back Window
+
+          - type: divider
+
+          - entity: binary_sensor.drivent_zap_left_datchik_peregruzki
+            name: Overload Left
+          - entity: binary_sensor.drivent_zap_back_datchik_peregruzki
+            name: Overload Back
+          - entity: sensor.drivent_zap_left_datchik_dozhdia
+            name: Rain Sensor
+
+          - type: divider
+
+          - entity: input_number.ventilation_target_co2
+            name: Target CO2
+          - entity: input_number.ventilation_min_position
+            name: Min Position
+          - entity: input_number.ventilation_max_position
+            name: Max Position
+          - entity: input_number.ventilation_min_outdoor_temp
+            name: Min Outdoor Temp
+
+  - title: Eva
+    type: sidebar
+    cards:
+      - type: custom:plotly-graph
+        entities:
+          - entity: sensor.sensor_eva_co2
+            name: CO2
+            yaxis: y
+            filters:
+              - sliding_window_moving_average:
+                  window_size: 2
+                  relative_to_visible: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.co2_min = Math.min(...nums);
+                      vars.co2_max = Math.max(...nums);
+                    } else {
+                      vars.co2_min = 400;
+                      vars.co2_max = 800;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#4CAF50'
+              width: 2
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
+          - entity: sensor.ventilation_eva_co2_error
+            name: Error
+            yaxis: y2
+            filters:
+              - sliding_window_moving_average:
+                  window_size: 2
+                  relative_to_visible: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.err_min = Math.min(...nums);
+                      vars.err_max = Math.max(...nums);
+                    } else {
+                      vars.err_min = -100;
+                      vars.err_max = 100;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#F44336'
+              width: 1
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
+          - entity: cover.drivent_eva_driventokonnyi_privod
+            attribute: current_position
+            name: Window
+            yaxis: y3
+            line:
+              color: '#AB47BC'
+              width: 2
+              shape: hv
+            connectgaps: true
+            showlegend: true
+
+        layout:
+          height: 600
+          shapes:
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650
+              y1: $ex parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650
+              line:
+                color: '#FF9800'
+                width: 2
+                dash: dot
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y2
+              y0: 0
+              y1: 0
+              line:
+                color: '#ffffff'
+                width: 1
+                dash: dash
+          xaxis:
+            rangeselector:
+              "y": 1.1
+              buttons:
+                - count: 1
+                  label: 15m
+                  step: minute
+                  stepmode: backward
+                - count: 6
+                  label: 6h
+                  step: hour
+                  stepmode: backward
+                - count: 12
+                  label: 12h
+                  step: hour
+                  stepmode: backward
+                - count: 24
+                  label: 24h
+                  step: hour
+                  stepmode: backward
+          yaxis:
+            title: CO2 (ppm)
+            side: left
+            fixedrange: true
+            autorange: false
+            range: |-
+              $fn ({vars, hass}) => {
+                const target = parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650;
+                const cMin = vars.co2_min ?? target;
+                const cMax = vars.co2_max ?? target;
+                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), 30);
+                const padded = maxDev * 1.15;
+                return [target - padded, target + padded];
+              }
+          yaxis2:
+            title: Error (ppm)
+            side: right
+            overlaying: "y"
+            showgrid: false
+            fixedrange: true
+            range: |-
+              $fn ({vars}) => {
+                const eMin = vars.err_min ?? -100;
+                const eMax = vars.err_max ?? 100;
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
+                const padded = maxErr * 1.15;
+                return [-padded, padded];
+              }
+          yaxis3:
+            visible: false
+            overlaying: "y"
+            fixedrange: true
+            range:
+              - 0
+              - 100
+        defaults:
+          xaxes:
+            fixedrange: true
+          yaxes:
+            fixedrange: true
+        time_offset: 5m
+        hours_to_show: 0.25
+        refresh_interval: 10
+        autorange_after_scroll: false
+        disable_pinch_to_zoom: true
+
+      - type: grid
+        columns: 3
+        square: false
+        view_layout:
+          position: sidebar
+        cards:
+          - type: gauge
+            entity: sensor.sensor_eva_co2
+            name: CO2
+            min: 300
+            max: 1500
+            segments:
+              - from: 300
+                color: '#2196F3'
+              - from: 400
+                color: '#43a047'
+              - from: 600
+                color: '#f4b400'
+              - from: 800
+                color: '#ff9800'
+              - from: 1000
+                color: '#db4437'
+            needle: true
+
+          - type: gauge
+            entity: input_number.ventilation_target_co2
+            name: Target
+            min: 300
+            max: 1500
+            needle: true
+            severity:
+              green: 400
+              yellow: 0
+              red: 0
+
+          - type: gauge
+            entity: cover.drivent_eva_driventokonnyi_privod
             attribute: current_position
             name: Window
             unit: "%"
@@ -235,44 +475,34 @@ views:
                 color: '#db4437'
             needle: true
 
-      # ----------------------------------------------------------------------
-      # Секция 3: Diagnostics
-      # ----------------------------------------------------------------------
       - type: entities
-        title: Diagnostics
+        title: Eva Diagnostics
         show_header_toggle: false
         state_color: true
         view_layout:
           position: sidebar
         entities:
-          - entity: sensor.sensor_zap_co2
+          - entity: sensor.sensor_eva_co2
             name: CO2 Level
-          - entity: sensor.co2_trend
+          - entity: sensor.eva_co2_trend
             name: CO2 Trend
-            icon: mdi:trending-up
           - entity: weather.forecast_home_assistant
             attribute: temperature
             name: Outdoor Temp
-            icon: mdi:thermometer
 
           - type: divider
 
-          - entity: sensor.ventilation_co2_error
+          - entity: sensor.ventilation_eva_co2_error
             name: CO2 Error
-            icon: mdi:delta
-          - entity: sensor.ventilation_recommended_position
+          - entity: sensor.ventilation_eva_recommended_position
             name: Recommended Position
-            icon: mdi:window-open-variant
-          - entity: cover.drivent_zap_left_driventokonnyi_privod
+          - entity: cover.drivent_eva_driventokonnyi_privod
             name: Window Position
-            icon: mdi:window-shutter
 
           - type: divider
 
-          - entity: binary_sensor.drivent_zap_left_datchik_peregruzki
+          - entity: binary_sensor.drivent_eva_datchik_peregruzki
             name: Overload Sensor
-          - entity: sensor.drivent_zap_left_datchik_dozhdia
-            name: Rain Sensor
 
           - type: divider
 
