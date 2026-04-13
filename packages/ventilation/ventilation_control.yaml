@@ -1,7 +1,7 @@
-# package: ventilation_zap_left
+# package: ventilation_multiroom
 # Version: 1.2.0
 # Last Updated: 2026-04-13
-# Description: Hybrid long-horizon CO2 ventilation control for Drivent V2 (zap_left window)
+# Description: Hybrid long-horizon CO2 ventilation control for zap/eva rooms
 #
 # АЛГОРИТМ: Гибридное управление по сглаженному CO2, длинному тренду и переменному шагу.
 # НЕ PID — привод двигается не чаще одного раза в 30 минут, но размер шага зависит от величины ошибки.
@@ -16,6 +16,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 input_number:
+  # Zap room (legacy/default entity names stay attached here for compatibility)
   ventilation_target_co2:
     name: "Ventilation Target CO2"
     min: 300
@@ -60,6 +61,25 @@ input_datetime:
     icon: mdi:clock-check-outline
     initial: "2000-01-01 00:00:00"
 
+  ventilation_eva_last_adjustment:
+    name: "Ventilation Eva Last Adjustment"
+    has_date: true
+    has_time: true
+    icon: mdi:clock-check-outline
+    initial: "2000-01-01 00:00:00"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  GROUPED COVERS (логические приводы комнаты)
+# ──────────────────────────────────────────────────────────────────────────────
+
+cover:
+  - platform: group
+    name: "Ventilation Zap Group"
+    unique_id: ventilation_zap_group
+    entities:
+      - cover.drivent_zap_left_driventokonnyi_privod
+      - cover.drivent_zap_back_driventokonnyi_privod
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  STATISTICS SENSORS (сглаживание и длинный тренд CO2)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -80,6 +100,28 @@ sensor:
     name: "Ventilation CO2 Change 30m"
     unique_id: ventilation_co2_change_30m
     entity_id: sensor.sensor_zap_co2
+    state_characteristic: change
+    max_age:
+      minutes: 30
+    sampling_size: 240
+    keep_last_sample: true
+    precision: 1
+
+  - platform: statistics
+    name: "Ventilation Eva CO2 Mean 30m"
+    unique_id: ventilation_eva_co2_mean_30m
+    entity_id: sensor.sensor_eva_co2
+    state_characteristic: average_step
+    max_age:
+      minutes: 30
+    sampling_size: 240
+    keep_last_sample: true
+    precision: 1
+
+  - platform: statistics
+    name: "Ventilation Eva CO2 Change 30m"
+    unique_id: ventilation_eva_co2_change_30m
+    entity_id: sensor.sensor_eva_co2
     state_characteristic: change
     max_age:
       minutes: 30
@@ -145,7 +187,7 @@ template:
           - sensor.sensor_zap_co2
           - sensor.ventilation_co2_mean_30m
           - sensor.ventilation_co2_change_30m
-          - cover.drivent_zap_left_driventokonnyi_privod
+          - cover.ventilation_zap_group
           - input_number.ventilation_target_co2
           - input_number.ventilation_min_position
           - input_number.ventilation_max_position
@@ -163,14 +205,14 @@ template:
              has_value('sensor.ventilation_co2_mean_30m') and
              has_value('sensor.ventilation_co2_change_30m') and
              has_value('sensor.co2_trend') and
-             has_value('cover.drivent_zap_left_driventokonnyi_privod') }}
+             has_value('cover.ventilation_zap_group') }}
         state: >
           {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
           {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
           {% set change_30m = states('sensor.ventilation_co2_change_30m') | float(0) %}
           {% set trend = states('sensor.co2_trend') %}
           {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {% set current_pos = state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) %}
+          {% set current_pos = state_attr('cover.ventilation_zap_group', 'current_position') | int(0) %}
           {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
           {% set evaluation_trigger = trigger.id | default('scheduled') %}
@@ -298,7 +340,7 @@ template:
             {% else %}
               extreme
             {% endif %}
-          current_position: "{{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) }}"
+          current_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | int(0) }}"
           pending_direction: >
             {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
             {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
@@ -522,6 +564,428 @@ template:
           co2_mean_30m: "{{ states('sensor.ventilation_co2_mean_30m') | float(0) }}"
           error_source: "co2_mean_30m"
 
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 3: EVA — ДОЛГИЙ ТРЕНД CO2
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: state
+        entity_id:
+          - sensor.ventilation_eva_co2_mean_30m
+          - sensor.ventilation_eva_co2_change_30m
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Eva CO2 Trend"
+        unique_id: ventilation_eva_co2_trend
+        icon: mdi:trending-up
+        availability: >
+          {{ has_value('sensor.sensor_eva_co2') and
+             has_value('sensor.ventilation_eva_co2_mean_30m') and
+             has_value('sensor.ventilation_eva_co2_change_30m') }}
+        state: >
+          {% set change_30m = states('sensor.ventilation_eva_co2_change_30m') | float(0) %}
+          {% set trend_threshold = 30 %}
+          {% if change_30m > trend_threshold %}
+            rising
+          {% elif change_30m < -trend_threshold %}
+            falling
+          {% else %}
+            stable
+          {% endif %}
+        attributes:
+          current_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
+          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
+          co2_change_30m: "{{ states('sensor.ventilation_eva_co2_change_30m') | float(0) }}"
+          trend_threshold_ppm: 30
+          window_minutes: 30
+          mean_age_coverage_ratio: "{{ state_attr('sensor.ventilation_eva_co2_mean_30m', 'age_coverage_ratio') | default(0) }}"
+          change_age_coverage_ratio: "{{ state_attr('sensor.ventilation_eva_co2_change_30m', 'age_coverage_ratio') | default(0) }}"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 4: EVA — РЕКОМЕНДУЕМАЯ ПОЗИЦИЯ ОКНА
+  # ════════════════════════════════════════════════════════════════════════════
+  - trigger:
+      - platform: time_pattern
+        minutes: "/30"
+        id: scheduled
+      - platform: state
+        entity_id:
+          - sensor.sensor_eva_co2
+          - sensor.ventilation_eva_co2_mean_30m
+          - sensor.ventilation_eva_co2_change_30m
+          - cover.drivent_eva_driventokonnyi_privod
+          - input_number.ventilation_target_co2
+          - input_number.ventilation_min_position
+          - input_number.ventilation_max_position
+        id: refresh
+      - platform: homeassistant
+        event: start
+        id: start
+    sensor:
+      - name: "Ventilation Eva Recommended Position"
+        unique_id: ventilation_eva_recommended_position
+        unit_of_measurement: "%"
+        icon: mdi:window-open-variant
+        availability: >
+          {{ has_value('sensor.sensor_eva_co2') and
+             has_value('sensor.ventilation_eva_co2_mean_30m') and
+             has_value('sensor.ventilation_eva_co2_change_30m') and
+             has_value('sensor.eva_co2_trend') and
+             has_value('cover.drivent_eva_driventokonnyi_privod') }}
+        state: >
+          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+          {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+          {% set trend = states('sensor.eva_co2_trend') %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {% set current_pos = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) %}
+          {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+          {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+          {% set evaluation_trigger = trigger.id | default('scheduled') %}
+          {% set previous_recommended = states('sensor.ventilation_eva_recommended_position') %}
+          {% set has_previous_recommended = previous_recommended not in ['unknown', 'unavailable', 'none', ''] %}
+          {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
+          {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
+          {% if evaluation_trigger == 'refresh' and has_previous_recommended %}
+            {{ previous_recommended | int(current_pos) }}
+          {% elif evaluation_trigger == 'start' %}
+            {{ current_pos }}
+          {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
+            {% set ns = namespace(step_band='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, immediate=false) %}
+
+            {% if abs_error <= 40 %}
+              {% set ns.step_band = 'deadband' %}
+            {% elif abs_error <= 80 %}
+              {% set ns.step_band = 'small' %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set ns.candidate_step = 5 %}
+                {% set ns.candidate_direction = 'open_small' %}
+                {% set ns.confirmation_required = true %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set ns.candidate_step = -5 %}
+                {% set ns.candidate_direction = 'close_small' %}
+                {% set ns.confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% set ns.step_band = 'medium' %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set ns.candidate_step = 10 %}
+                {% set ns.candidate_direction = 'open_medium' %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set ns.candidate_step = -10 %}
+                {% set ns.candidate_direction = 'close_medium' %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% set ns.step_band = 'large' %}
+              {% if error > 0 %}
+                {% set ns.candidate_step = 20 %}
+                {% set ns.candidate_direction = 'open_large' %}
+                {% set ns.immediate = true %}
+              {% elif error < 0 %}
+                {% set ns.candidate_step = -20 %}
+                {% set ns.candidate_direction = 'close_large' %}
+                {% set ns.immediate = true %}
+              {% endif %}
+            {% else %}
+              {% set ns.step_band = 'extreme' %}
+              {% if error > 0 %}
+                {% set ns.candidate_step = 30 %}
+                {% set ns.candidate_direction = 'open_extreme' %}
+                {% set ns.immediate = true %}
+              {% elif error < 0 %}
+                {% set ns.candidate_step = -30 %}
+                {% set ns.candidate_direction = 'close_extreme' %}
+                {% set ns.immediate = true %}
+              {% endif %}
+            {% endif %}
+
+            {% set confirmed_step = 0 %}
+            {% set pending_direction = 'hold' %}
+            {% set pending_count = 0 %}
+
+            {% if ns.candidate_step == 0 %}
+              {% set confirmed_step = 0 %}
+            {% elif ns.immediate %}
+              {% set confirmed_step = ns.candidate_step %}
+            {% elif not ns.confirmation_required %}
+              {% set confirmed_step = ns.candidate_step %}
+            {% else %}
+              {% if prev_pending_direction == ns.candidate_direction %}
+                {% set pending_count = prev_pending_count + 1 %}
+              {% else %}
+                {% set pending_count = 1 %}
+              {% endif %}
+
+              {% if pending_count >= 2 %}
+                {% set confirmed_step = ns.candidate_step %}
+                {% set pending_count = 0 %}
+                {% set pending_direction = 'hold' %}
+              {% else %}
+                {% set pending_direction = ns.candidate_direction %}
+              {% endif %}
+            {% endif %}
+
+            {% set new_pos = current_pos + confirmed_step %}
+            {% set new_pos = [new_pos, min_pos] | max %}
+            {% set new_pos = [new_pos, max_pos] | min %}
+            {{ new_pos | int }}
+          {% endif %}
+        attributes:
+          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
+          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
+          co2_change_30m: "{{ states('sensor.ventilation_eva_co2_change_30m') | float(0) }}"
+          trend: "{{ states('sensor.eva_co2_trend') }}"
+          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
+          error_ppm: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {{ (co2 - target) | round(0) }}
+          abs_error_ppm: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {{ ((co2 - target) | abs) | round(0) }}
+          step_band: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set abs_error = (co2 - target) | abs %}
+            {% if abs_error <= 40 %}
+              deadband
+            {% elif abs_error <= 80 %}
+              small
+            {% elif abs_error <= 140 %}
+              medium
+            {% elif abs_error <= 220 %}
+              large
+            {% else %}
+              extreme
+            {% endif %}
+          current_position: "{{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) }}"
+          pending_direction: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set trend = states('sensor.eva_co2_trend') %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set evaluation_trigger = trigger.id | default('scheduled') %}
+            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
+            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
+            {% if evaluation_trigger != 'scheduled' %}
+              {{ prev_pending_direction }}
+            {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
+            {% set candidate_direction = 'hold' %}
+            {% set candidate_step = 0 %}
+            {% set confirmation_required = false %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
+                {% set candidate_step = 5 %}
+                {% set confirmation_required = true %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
+                {% set candidate_step = -5 %}
+                {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% else %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% endif %}
+
+            {% if candidate_step == 0 or immediate or not confirmation_required %}
+              hold
+            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
+              hold
+            {% else %}
+              {{ candidate_direction }}
+            {% endif %}
+            {% endif %}
+          pending_count: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set trend = states('sensor.eva_co2_trend') %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set evaluation_trigger = trigger.id | default('scheduled') %}
+            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
+            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
+            {% if evaluation_trigger != 'scheduled' %}
+              {{ prev_pending_count }}
+            {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
+            {% set candidate_direction = 'hold' %}
+            {% set candidate_step = 0 %}
+            {% set confirmation_required = false %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
+                {% set candidate_step = 5 %}
+                {% set confirmation_required = true %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
+                {% set candidate_step = -5 %}
+                {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% else %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% endif %}
+
+            {% if candidate_step == 0 or immediate or not confirmation_required %}
+              0
+            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
+              0
+            {% elif prev_pending_direction == candidate_direction %}
+              {{ prev_pending_count + 1 }}
+            {% else %}
+              1
+            {% endif %}
+            {% endif %}
+          last_step: >
+            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+            {% set trend = states('sensor.eva_co2_trend') %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set evaluation_trigger = trigger.id | default('scheduled') %}
+            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
+            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
+            {% if evaluation_trigger != 'scheduled' %}
+              0
+            {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
+            {% set candidate_direction = 'hold' %}
+            {% set candidate_step = 0 %}
+            {% set confirmation_required = false %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
+                {% set candidate_step = 5 %}
+                {% set confirmation_required = true %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
+                {% set candidate_step = -5 %}
+                {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% else %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
+              {% endif %}
+            {% endif %}
+
+            {% if candidate_step == 0 %}
+              0
+            {% elif immediate or not confirmation_required %}
+              {{ candidate_step }}
+            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
+              {{ candidate_step }}
+            {% else %}
+              0
+            {% endif %}
+            {% endif %}
+
+      - name: "Ventilation Eva CO2 Error"
+        unique_id: ventilation_eva_co2_error
+        unit_of_measurement: "ppm"
+        state_class: measurement
+        icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.sensor_eva_co2') and has_value('sensor.ventilation_eva_co2_mean_30m') }}
+        state: >
+          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+          {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {{ (target - co2) | round(0) }}
+        attributes:
+          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
+          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
+          error_source: "co2_mean_30m"
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -546,7 +1010,7 @@ automation:
       - condition: template
         value_template: >
           {% set recommended = states('sensor.ventilation_recommended_position') | int(-1) %}
-          {% set current = state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) %}
+          {% set current = state_attr('cover.ventilation_zap_group', 'current_position') | int(0) %}
           {{ recommended >= 0 and recommended != current }}
 
       # Rate limit: минимум 30 минут между движениями привода
@@ -557,9 +1021,10 @@ automation:
           {{ (as_timestamp(now()) - last_ts) >= 1800 }}
 
       # Нет активных ошибок привода
-      - condition: state
-        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
-        state: "off"
+      - condition: template
+        value_template: >
+          {{ is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and
+             is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') }}
 
       # CO2 сенсор доступен
       - condition: template
@@ -579,7 +1044,7 @@ automation:
 
       - service: cover.set_cover_position
         target:
-          entity_id: cover.drivent_zap_left_driventokonnyi_privod
+          entity_id: cover.ventilation_zap_group
         data:
           position: "{{ recommended }}"
 
@@ -613,6 +1078,11 @@ automation:
         to: "on"
         id: "overload"
 
+      - platform: state
+        entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
+        to: "on"
+        id: "overload"
+
       # CO2 сенсор стал unavailable (потеря связи)
       - platform: state
         entity_id: sensor.sensor_zap_co2
@@ -630,7 +1100,7 @@ automation:
       # Окно реально открыто
       - condition: template
         value_template: >
-          {{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) > 0 }}
+          {{ state_attr('cover.ventilation_zap_group', 'current_position') | int(0) > 0 }}
 
       # Хотя бы одно условие для закрытия выполнено
       - condition: or
@@ -645,6 +1115,9 @@ automation:
           - condition: state
             entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
             state: "on"
+          - condition: state
+            entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
+            state: "on"
           # CO2 сенсор недоступен
           - condition: state
             entity_id: sensor.sensor_zap_co2
@@ -654,7 +1127,9 @@ automation:
       - variables:
           reason: >
             {% if is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'on') %}
-              overload
+              overload_left
+            {% elif is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'on') %}
+              overload_back
             {% elif is_state('sensor.sensor_zap_co2', 'unavailable') %}
               co2_sensor_lost
             {% else %}
@@ -663,7 +1138,7 @@ automation:
 
       - service: cover.close_cover
         target:
-          entity_id: cover.drivent_zap_left_driventokonnyi_privod
+          entity_id: cover.ventilation_zap_group
 
       - service: notify.zapgroup
         data:
@@ -673,8 +1148,8 @@ automation:
             {% if reason == 'cold_outdoor' %}
               Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
               (мин: {{ states('input_number.ventilation_min_outdoor_temp') }}°C).
-            {% elif reason == 'overload' %}
-              Привод обнаружил перегрузку. Проверьте окно.
+            {% elif reason in ['overload_left', 'overload_back'] %}
+              Привод обнаружил перегрузку ({{ reason }}). Проверьте окна.
             {% elif reason == 'co2_sensor_lost' %}
               Датчик CO2 недоступен. Окно закрыто в целях безопасности.
             {% endif %}
@@ -692,6 +1167,10 @@ automation:
         entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
         to: "on"
 
+      - platform: state
+        entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
+        to: "on"
+
     action:
       - service: notify.zapgroup
         data:
@@ -703,4 +1182,167 @@ automation:
             - не заблокирована ли ручка
 
             Текущий CO2: {{ states('sensor.sensor_zap_co2') }} ppm
-            Позиция окна: {{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') }}%
+            Позиция группы окон: {{ state_attr('cover.ventilation_zap_group', 'current_position') }}%
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  EVA: ОСНОВНОЕ УПРАВЛЕНИЕ
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Управление вентиляцией по CO2 eva"
+    alias: ventilation_eva_control_main
+    mode: single
+    max_exceeded: silent
+    initial_state: true
+
+    trigger:
+      - platform: state
+        entity_id: sensor.ventilation_eva_recommended_position
+
+    condition:
+      - condition: template
+        value_template: >
+          {% set recommended = states('sensor.ventilation_eva_recommended_position') | int(-1) %}
+          {% set current = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) %}
+          {{ recommended >= 0 and recommended != current }}
+
+      - condition: template
+        value_template: >
+          {% set last = states('input_datetime.ventilation_eva_last_adjustment') %}
+          {% set last_ts = as_timestamp(last) | float(0) %}
+          {{ (as_timestamp(now()) - last_ts) >= 1800 }}
+
+      - condition: state
+        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
+        state: "off"
+
+      - condition: template
+        value_template: >
+          {{ has_value('sensor.sensor_eva_co2') }}
+
+      - condition: template
+        value_template: >
+          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {{ outdoor >= min_temp }}
+
+    action:
+      - variables:
+          recommended: "{{ states('sensor.ventilation_eva_recommended_position') | int(0) }}"
+
+      - service: cover.set_cover_position
+        target:
+          entity_id: cover.drivent_eva_driventokonnyi_privod
+        data:
+          position: "{{ recommended }}"
+
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ventilation_eva_last_adjustment
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  EVA: АВАРИЙНОЕ ЗАКРЫТИЕ
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Аварийное закрытие окна eva"
+    alias: ventilation_eva_safety_close
+    mode: single
+    max_exceeded: silent
+    initial_state: true
+
+    trigger:
+      - platform: template
+        value_template: >
+          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {{ outdoor < min_temp }}
+        id: "cold"
+
+      - platform: state
+        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
+        to: "on"
+        id: "overload"
+
+      - platform: state
+        entity_id: sensor.sensor_eva_co2
+        to: "unavailable"
+        for:
+          minutes: 2
+        id: "co2_lost"
+
+      - platform: time_pattern
+        minutes: "/10"
+        id: "periodic"
+
+    condition:
+      - condition: template
+        value_template: >
+          {{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) > 0 }}
+
+      - condition: or
+        conditions:
+          - condition: template
+            value_template: >
+              {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+              {{ outdoor < min_temp }}
+          - condition: state
+            entity_id: binary_sensor.drivent_eva_datchik_peregruzki
+            state: "on"
+          - condition: state
+            entity_id: sensor.sensor_eva_co2
+            state: "unavailable"
+
+    action:
+      - variables:
+          reason: >
+            {% if is_state('binary_sensor.drivent_eva_datchik_peregruzki', 'on') %}
+              overload
+            {% elif is_state('sensor.sensor_eva_co2', 'unavailable') %}
+              co2_sensor_lost
+            {% else %}
+              cold_outdoor
+            {% endif %}
+
+      - service: cover.close_cover
+        target:
+          entity_id: cover.drivent_eva_driventokonnyi_privod
+
+      - service: notify.zapgroup
+        data:
+          title: "🪟 Окно Eva закрыто (безопасность)"
+          message: >
+            Причина: {{ reason }}.
+            {% if reason == 'cold_outdoor' %}
+              Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
+              (мин: {{ states('input_number.ventilation_min_outdoor_temp') }}°C).
+            {% elif reason == 'overload' %}
+              Привод Eva обнаружил перегрузку. Проверьте окно.
+            {% elif reason == 'co2_sensor_lost' %}
+              Датчик CO2 Eva недоступен. Окно закрыто в целях безопасности.
+            {% endif %}
+
+  # ══════════════════════════════════════════════════════════════════════════
+  #  EVA: УВЕДОМЛЕНИЕ ОБ ОШИБКЕ ПРИВОДА
+  # ══════════════════════════════════════════════════════════════════════════
+  - id: "Ошибка привода окна eva"
+    alias: ventilation_eva_device_error
+    mode: single
+    initial_state: true
+
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
+        to: "on"
+
+    action:
+      - service: notify.zapgroup
+        data:
+          title: "⚠️ Перегрузка привода Drivent (eva)"
+          message: >
+            Привод Eva обнаружил перегрузку. Проверьте:
+            - не зажато ли что-то в окне
+            - открывается ли окно без заеданий
+            - не заблокирована ли ручка
+
+            Текущий CO2 Eva: {{ states('sensor.sensor_eva_co2') }} ppm
+            Позиция окна Eva: {{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') }}%
