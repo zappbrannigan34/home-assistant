@@ -1,11 +1,11 @@
 # package: ventilation_zap_left
-# Version: 1.1.0
+# Version: 1.2.0
 # Last Updated: 2026-04-13
 # Description: Hybrid long-horizon CO2 ventilation control for Drivent V2 (zap_left window)
 #
-# АЛГОРИТМ: Гибридное зонное управление по сглаженному CO2 и длинному тренду.
-# НЕ PID — привод двигается только когда 30-минутное окно подтверждает необходимость.
-# Оценка каждые 30 минут, шаг 5% или 2%, deadband ±50 ppm.
+# АЛГОРИТМ: Гибридное управление по сглаженному CO2, длинному тренду и переменному шагу.
+# НЕ PID — привод двигается не чаще одного раза в 30 минут, но размер шага зависит от величины ошибки.
+# Малые ошибки подтверждаются трендом, большие ошибки двигаются сразу более крупным шагом.
 #
 # РЕСУРС ПРИВОДА: WindowMaster рейтинг ~10 000 циклов.
 # С длинным тренд-фильтром: реальных движений заметно меньше, чем при коротком шумном контуре.
@@ -133,7 +133,8 @@ template:
 
   # ════════════════════════════════════════════════════════════════════════════
   #  БЛОК 2: РЕКОМЕНДУЕМАЯ ПОЗИЦИЯ ОКНА (30-минутный гибридный контур)
-  #  Оценка каждые 30 минут, умеренные зоны требуют 2 подтверждения подряд
+  #  Оценка каждые 30 минут, шаг переменный по величине ошибки,
+  #  подтверждение требуется только в малой зоне около deadband
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
@@ -182,54 +183,65 @@ template:
           {% elif evaluation_trigger == 'start' %}
             {{ current_pos }}
           {% else %}
-            {% set ns = namespace(zone='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, severe_override=false) %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
+            {% set ns = namespace(step_band='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, immediate=false) %}
 
-            {# --- ЗОНЫ ПО 30-МИНУТНОМУ СГЛАЖЕННОМУ CO2 --- #}
-            {% if co2 > target + 150 %}
-              {% set ns.zone = 'high_critical' %}
-              {% if trend in ['rising', 'stable'] %}
+            {# --- ГИБРИД С ПЕРЕМЕННЫМ ШАГОМ: частота фиксирована, шаг зависит от ошибки --- #}
+            {% if abs_error <= 40 %}
+              {% set ns.step_band = 'deadband' %}
+            {% elif abs_error <= 80 %}
+              {% set ns.step_band = 'small' %}
+              {% if error > 0 and trend == 'rising' %}
                 {% set ns.candidate_step = 5 %}
-                {% set ns.candidate_direction = 'open_critical' %}
-                {% set ns.severe_override = true %}
-              {% endif %}
-            {% elif co2 > target + 50 %}
-              {% set ns.zone = 'high_moderate' %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set ns.candidate_step = 2 %}
-                {% set ns.candidate_direction = 'open_moderate' %}
+                {% set ns.candidate_direction = 'open_small' %}
                 {% set ns.confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 50 %}
-              {% set ns.zone = 'deadband' %}
-              {% if trend == 'rising' %}
-                {% set ns.candidate_step = 2 %}
-                {% set ns.candidate_direction = 'open_preventive' %}
-                {% set ns.confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 150 %}
-              {% set ns.zone = 'low_moderate' %}
-              {% if trend == 'falling' %}
+              {% elif error < 0 and trend == 'falling' %}
                 {% set ns.candidate_step = -5 %}
-                {% set ns.candidate_direction = 'close_moderate' %}
+                {% set ns.candidate_direction = 'close_small' %}
                 {% set ns.confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% set ns.step_band = 'medium' %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set ns.candidate_step = 10 %}
+                {% set ns.candidate_direction = 'open_medium' %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set ns.candidate_step = -10 %}
+                {% set ns.candidate_direction = 'close_medium' %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% set ns.step_band = 'large' %}
+              {% if error > 0 %}
+                {% set ns.candidate_step = 20 %}
+                {% set ns.candidate_direction = 'open_large' %}
+                {% set ns.immediate = true %}
+              {% elif error < 0 %}
+                {% set ns.candidate_step = -20 %}
+                {% set ns.candidate_direction = 'close_large' %}
+                {% set ns.immediate = true %}
               {% endif %}
             {% else %}
-              {% set ns.zone = 'low_critical' %}
-              {% if trend in ['falling', 'stable'] %}
-                {% set ns.candidate_step = -5 %}
-                {% set ns.candidate_direction = 'close_critical' %}
-                {% set ns.severe_override = true %}
+              {% set ns.step_band = 'extreme' %}
+              {% if error > 0 %}
+                {% set ns.candidate_step = 30 %}
+                {% set ns.candidate_direction = 'open_extreme' %}
+                {% set ns.immediate = true %}
+              {% elif error < 0 %}
+                {% set ns.candidate_step = -30 %}
+                {% set ns.candidate_direction = 'close_extreme' %}
+                {% set ns.immediate = true %}
               {% endif %}
             {% endif %}
 
-            {# --- ПОДТВЕРЖДЕНИЕ СИГНАЛА В УМЕРЕННЫХ ЗОНАХ --- #}
+            {# --- ПОДТВЕРЖДЕНИЕ НУЖНО ТОЛЬКО В МАЛОЙ ЗОНЕ --- #}
             {% set confirmed_step = 0 %}
             {% set pending_direction = 'hold' %}
             {% set pending_count = 0 %}
 
             {% if ns.candidate_step == 0 %}
               {% set confirmed_step = 0 %}
-            {% elif ns.severe_override %}
+            {% elif ns.immediate %}
               {% set confirmed_step = ns.candidate_step %}
             {% elif not ns.confirmation_required %}
               {% set confirmed_step = ns.candidate_step %}
@@ -242,6 +254,8 @@ template:
 
               {% if pending_count >= 2 %}
                 {% set confirmed_step = ns.candidate_step %}
+                {% set pending_count = 0 %}
+                {% set pending_direction = 'hold' %}
               {% else %}
                 {% set pending_direction = ns.candidate_direction %}
               {% endif %}
@@ -258,6 +272,32 @@ template:
           co2_change_30m: "{{ states('sensor.ventilation_co2_change_30m') | float(0) }}"
           trend: "{{ states('sensor.co2_trend') }}"
           target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
+          error_ppm: >
+            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {{ (co2 - target) | round(0) }}
+          abs_error_ppm: >
+            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {{ ((co2 - target) | abs) | round(0) }}
+          step_band: >
+            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
+            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set abs_error = (co2 - target) | abs %}
+            {% if abs_error <= 40 %}
+              deadband
+            {% elif abs_error <= 80 %}
+              small
+            {% elif abs_error <= 140 %}
+              medium
+            {% elif abs_error <= 220 %}
+              large
+            {% else %}
+              extreme
+            {% endif %}
           current_position: "{{ state_attr('cover.drivent_zap_left_driventokonnyi_privod', 'current_position') | int(0) }}"
           pending_direction: >
             {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
@@ -270,43 +310,54 @@ template:
             {% if evaluation_trigger != 'scheduled' %}
               {{ prev_pending_direction }}
             {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
             {% set candidate_direction = 'hold' %}
             {% set candidate_step = 0 %}
             {% set confirmation_required = false %}
-            {% set severe_override = false %}
-            {% if co2 > target + 150 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_critical' %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
                 {% set candidate_step = 5 %}
-                {% set severe_override = true %}
-              {% endif %}
-            {% elif co2 > target + 50 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_moderate' %}
-                {% set candidate_step = 2 %}
                 {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 50 %}
-              {% if trend == 'rising' %}
-                {% set candidate_direction = 'open_preventive' %}
-                {% set candidate_step = 2 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 150 %}
-              {% if trend == 'falling' %}
-                {% set candidate_direction = 'close_moderate' %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
                 {% set candidate_step = -5 %}
                 {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
               {% endif %}
             {% else %}
-              {% if trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_critical' %}
-                {% set candidate_step = -5 %}
-                {% set severe_override = true %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
               {% endif %}
             {% endif %}
 
-            {% if candidate_step == 0 or severe_override or not confirmation_required %}
+            {% if candidate_step == 0 or immediate or not confirmation_required %}
               hold
             {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
               hold
@@ -325,43 +376,56 @@ template:
             {% if evaluation_trigger != 'scheduled' %}
               {{ prev_pending_count }}
             {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
             {% set candidate_direction = 'hold' %}
             {% set candidate_step = 0 %}
             {% set confirmation_required = false %}
-            {% set severe_override = false %}
-            {% if co2 > target + 150 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_critical' %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
                 {% set candidate_step = 5 %}
-                {% set severe_override = true %}
-              {% endif %}
-            {% elif co2 > target + 50 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_moderate' %}
-                {% set candidate_step = 2 %}
                 {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 50 %}
-              {% if trend == 'rising' %}
-                {% set candidate_direction = 'open_preventive' %}
-                {% set candidate_step = 2 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 150 %}
-              {% if trend == 'falling' %}
-                {% set candidate_direction = 'close_moderate' %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
                 {% set candidate_step = -5 %}
                 {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
               {% endif %}
             {% else %}
-              {% if trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_critical' %}
-                {% set candidate_step = -5 %}
-                {% set severe_override = true %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
               {% endif %}
             {% endif %}
 
-            {% if candidate_step == 0 or severe_override or not confirmation_required %}
+            {% if candidate_step == 0 or immediate or not confirmation_required %}
+              0
+            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
               0
             {% elif prev_pending_direction == candidate_direction %}
               {{ prev_pending_count + 1 }}
@@ -380,45 +444,56 @@ template:
             {% if evaluation_trigger != 'scheduled' %}
               0
             {% else %}
+            {% set error = (co2 - target) | float(0) %}
+            {% set abs_error = error | abs %}
             {% set candidate_direction = 'hold' %}
             {% set candidate_step = 0 %}
             {% set confirmation_required = false %}
-            {% set severe_override = false %}
-            {% if co2 > target + 150 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_critical' %}
+            {% set immediate = false %}
+            {% if abs_error <= 40 %}
+            {% elif abs_error <= 80 %}
+              {% if error > 0 and trend == 'rising' %}
+                {% set candidate_direction = 'open_small' %}
                 {% set candidate_step = 5 %}
-                {% set severe_override = true %}
-              {% endif %}
-            {% elif co2 > target + 50 %}
-              {% if trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_moderate' %}
-                {% set candidate_step = 2 %}
                 {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 50 %}
-              {% if trend == 'rising' %}
-                {% set candidate_direction = 'open_preventive' %}
-                {% set candidate_step = 2 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif co2 > target - 150 %}
-              {% if trend == 'falling' %}
-                {% set candidate_direction = 'close_moderate' %}
+              {% elif error < 0 and trend == 'falling' %}
+                {% set candidate_direction = 'close_small' %}
                 {% set candidate_step = -5 %}
                 {% set confirmation_required = true %}
+              {% endif %}
+            {% elif abs_error <= 140 %}
+              {% if error > 0 and trend in ['rising', 'stable'] %}
+                {% set candidate_direction = 'open_medium' %}
+                {% set candidate_step = 10 %}
+              {% elif error < 0 and trend in ['falling', 'stable'] %}
+                {% set candidate_direction = 'close_medium' %}
+                {% set candidate_step = -10 %}
+              {% endif %}
+            {% elif abs_error <= 220 %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_large' %}
+                {% set candidate_step = 20 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_large' %}
+                {% set candidate_step = -20 %}
+                {% set immediate = true %}
               {% endif %}
             {% else %}
-              {% if trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_critical' %}
-                {% set candidate_step = -5 %}
-                {% set severe_override = true %}
+              {% if error > 0 %}
+                {% set candidate_direction = 'open_extreme' %}
+                {% set candidate_step = 30 %}
+                {% set immediate = true %}
+              {% elif error < 0 %}
+                {% set candidate_direction = 'close_extreme' %}
+                {% set candidate_step = -30 %}
+                {% set immediate = true %}
               {% endif %}
             {% endif %}
 
             {% if candidate_step == 0 %}
               0
-            {% elif severe_override or not confirmation_required %}
+            {% elif immediate or not confirmation_required %}
               {{ candidate_step }}
             {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
               {{ candidate_step }}
@@ -436,11 +511,16 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.sensor_zap_co2') }}
+          {{ has_value('sensor.sensor_zap_co2') and has_value('sensor.ventilation_co2_mean_30m') }}
         state: >
-          {% set co2 = states('sensor.sensor_zap_co2') | float(650) %}
+          {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
+          {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
           {% set target = states('input_number.ventilation_target_co2') | float(650) %}
           {{ (target - co2) | round(0) }}
+        attributes:
+          raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
+          co2_mean_30m: "{{ states('sensor.ventilation_co2_mean_30m') | float(0) }}"
+          error_source: "co2_mean_30m"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
