@@ -1,13 +1,6 @@
 views:
   - title: Ventilation Control
-    type: custom:grid-layout
-    layout:
-      grid-template-columns: 2fr 1fr
-      grid-template-rows: auto
-      grid-gap: 8px
-      mediaquery:
-        "(max-width: 800px)":
-          grid-template-columns: 1fr
+    type: sidebar
     cards:
       # ----------------------------------------------------------------------
       # Секция 1: График (Plotly)
@@ -186,15 +179,14 @@ views:
         autorange_after_scroll: false
         disable_pinch_to_zoom: true
 
-        view_layout:
-          grid-area: 1 / 1 / span 3 / 2
-
       # ----------------------------------------------------------------------
-      # Секция 2: Правая колонка — Gauges
+      # Секция 2: Gauges (sidebar)
       # ----------------------------------------------------------------------
       - type: grid
         columns: 3
         square: false
+        view_layout:
+          position: sidebar
         cards:
           - type: gauge
             entity: sensor.sensor_zap_co2
@@ -242,16 +234,16 @@ views:
               - from: 80
                 color: '#db4437'
             needle: true
-        view_layout:
-          grid-area: 1 / 2 / 2 / 3
 
       # ----------------------------------------------------------------------
-      # Секция 3: Правая колонка — Diagnostics
+      # Секция 3: Diagnostics
       # ----------------------------------------------------------------------
       - type: entities
         title: Diagnostics
         show_header_toggle: false
         state_color: true
+        view_layout:
+          position: sidebar
         entities:
           - entity: sensor.sensor_zap_co2
             name: CO2 Level
@@ -284,13 +276,6 @@ views:
 
           - type: divider
 
-          - entity: switch.radiator_left_zap_open_window
-            name: Radiator Open Window
-          - entity: number.radiator_left_zap_open_window_temperature
-            name: Radiator OW Temp
-
-          - type: divider
-
           - entity: input_number.ventilation_target_co2
             name: Target CO2
           - entity: input_number.ventilation_min_position
@@ -299,5 +284,3 @@ views:
             name: Max Position
           - entity: input_number.ventilation_min_outdoor_temp
             name: Min Outdoor Temp
-        view_layout:
-          grid-area: 2 / 2 / 4 / 3
