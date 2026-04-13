@@ -482,6 +482,13 @@ automation:
         value_template: >
           {{ has_value('sensor.sensor_zap_co2') }}
 
+      # На улице не холоднее минимального порога
+      - condition: template
+        value_template: >
+          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
+          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {{ outdoor >= min_temp }}
+
     action:
       - variables:
           recommended: "{{ states('sensor.ventilation_recommended_position') | int(0) }}"
