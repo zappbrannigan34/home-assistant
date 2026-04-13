@@ -173,9 +173,13 @@ template:
           {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
           {% set evaluation_trigger = trigger.id | default('scheduled') %}
+          {% set previous_recommended = states('sensor.ventilation_recommended_position') %}
+          {% set has_previous_recommended = previous_recommended not in ['unknown', 'unavailable', 'none', ''] %}
           {% set prev_pending_direction = state_attr('sensor.ventilation_recommended_position', 'pending_direction') | default('hold') %}
           {% set prev_pending_count = state_attr('sensor.ventilation_recommended_position', 'pending_count') | default(0) | int(0) %}
-          {% if evaluation_trigger != 'scheduled' %}
+          {% if evaluation_trigger == 'refresh' and has_previous_recommended %}
+            {{ previous_recommended | int(current_pos) }}
+          {% elif evaluation_trigger == 'start' %}
             {{ current_pos }}
           {% else %}
             {% set ns = namespace(zone='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, severe_override=false) %}
