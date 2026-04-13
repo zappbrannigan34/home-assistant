@@ -27,8 +27,11 @@ curl -s -H "Authorization: Bearer $HA_TOKEN" $HA_URL/api/states/sensor.adaptive_
 ### Файловый доступ к серверу
 
 HA config directory доступен через SMB (сетевой диск):
-- **Windows:** диск `Z:\` (mapped) или `\\<SMB_HOST>` (creds в `.secrets.env`)
-- **Путь к конфигу:** `Z:\` → `configuration.yaml`, `packages/`, `.storage/` и т.д. (Z: = `/config/` напрямую, без подпапки config)
+- **Windows:** диск `Z:\` **или** `R:\` (mapped, зависит от текущей user/session) или прямой UNC `\\<SMB_HOST>\config` (creds в `.secrets.env`)
+- **Канонический SMB path:** `\\<SMB_HOST>\config`
+- **Путь к конфигу:** `Z:\` / `R:\` → `configuration.yaml`, `packages/`, `.storage/` и т.д. (`R:`/`Z:` = `/config/` напрямую, без подпапки config)
+
+Если нужная буква диска не видна в текущем shell, это **не означает**, что сервер недоступен: сначала проверить SMB-доступ по `\\<SMB_HOST>\config` и при необходимости примапить диск в текущую сессию.
 
 Для деплоя YAML-пакетов — копировать файлы в `Z:\packages\`.
 
@@ -302,9 +305,8 @@ Trend-based CO2 ventilation control. НЕ PID — зонный алгоритм,
 
 | Automation | Purpose |
 |------------|---------|
-| `ventilation_control_main` | Применяет рекомендуемую позицию к приводу (rate limit 4.5 мин) |
+| `ventilation_control_main` | Применяет рекомендуемую позицию к приводу (rate limit 1 час) |
 | `ventilation_safety_close` | Аварийное закрытие: холод, перегрузка, потеря CO2 |
-| `ventilation_radiator_sync` | Синхронизация радиатора: open window mode при >5%, выкл при <3% |
 | `ventilation_device_error` | Уведомление о перегрузке привода |
 
 ### Algorithm Parameters
@@ -371,6 +373,7 @@ automation:
 | Новый template sensor | **RESTART** (reload не создаст entity) |
 | Структурные изменения YAML | **RESTART** |
 | Условия/действия automation | `automation.reload` |
+| Изменение дашборда (YAML) | **НИЧЕГО** — просто обновить страницу в браузере (F5). HA подхватывает YAML-дашборды автоматически при загрузке страницы. НЕ нужен ни reload, ни restart. |
 
 ### Comments Language
 
@@ -382,11 +385,13 @@ automation:
 
 ## Deploy Workflow
 
+**Source of truth:** сначала редактировать файл **в репозитории**, и только потом деплоить его на сервер. Не редактировать live-сервер первым, если только это не server-only файл вроде `configuration.yaml`.
+
 1. Отредактировать YAML в репозитории
 2. Валидировать синтаксис (HA configuration check)
-3. Скопировать на сервер: `Z:\packages\<package_name>\`
-4. Для дашбордов: скопировать в `Z:\dashboards\`
-5. **Регистрация нового дашборда:** добавить запись в `Z:\configuration.yaml` → `lovelace: dashboards:` (файл не в репозитории, только на сервере). Формат:
+3. Скопировать на сервер: `Z:\packages\<package_name>\` / `R:\packages\<package_name>\` / `\\<SMB_HOST>\config\packages\<package_name>\`
+4. Для дашбордов: скопировать в `Z:\dashboards\` / `R:\dashboards\`
+5. **Регистрация нового дашборда:** добавить запись в `Z:\configuration.yaml` / `R:\configuration.yaml` → `lovelace: dashboards:` (файл не в репозитории, только на сервере). Формат:
    ```yaml
    lovelace:
      dashboards:
@@ -401,6 +406,9 @@ automation:
    - Изменения логики → `reload_all` через API
    - Новые entities / структурные изменения → **restart**
    - Новый дашборд / изменение lovelace config → **restart**
+7. Перед коммитом/пушем сделать security review: убедиться, что в git не попадают `.secrets.env`, server-only файлы (`configuration.yaml`, `.storage/*`, БД, токены, пароли) и любые другие чувствительные данные.
+8. После деплоя обязательно проверить серверное состояние: validation/config check, `home-assistant.log`, ошибки/предупреждения, сообщения Spook и Repairs.
+9. Только после этого делать commit и push в GitHub.
 
 ```bash
 source .secrets.env
@@ -427,6 +435,13 @@ curl -X POST -H "Authorization: Bearer $HA_TOKEN" -H "Content-Type: application/
 2. **Не коммитить без проверки** — особенно переименования entity_id
 
 3. **Не менять entity_id source-сенсоров** (типа `sensor.sensor_eva_*`) без явного разрешения владельца
+
+4. **После деплоя обязательно проверить сервер**:
+   - HA configuration/server validation
+   - `home-assistant.log` / error log
+   - сообщения/предупреждения Spook
+   - Repairs / Issues в Home Assistant
+   - что новые/изменённые entities не ушли в `unknown` / `unavailable`
 
 ### При проблемах
 
