@@ -18,7 +18,7 @@
 input_number:
   ventilation_target_co2:
     name: "Ventilation Target CO2"
-    min: 400
+    min: 300
     max: 1000
     step: 50
     unit_of_measurement: "ppm"
