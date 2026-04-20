@@ -222,8 +222,14 @@ views:
         entities:
           - entity: sensor.sensor_zap_co2
             name: CO2 Level
+          - entity: sensor.ventilation_co2_filtered
+            name: Filtered CO2
+          - entity: sensor.ventilation_co2_slope
+            name: CO2 Slope
           - entity: sensor.co2_trend
             name: CO2 Trend
+          - entity: sensor.ventilation_forecast_co2_30m
+            name: Forecast CO2 30m
           - entity: weather.forecast_home_assistant
             attribute: temperature
             name: Outdoor Temp
@@ -484,8 +490,14 @@ views:
         entities:
           - entity: sensor.sensor_eva_co2
             name: CO2 Level
+          - entity: sensor.ventilation_eva_co2_filtered
+            name: Filtered CO2
+          - entity: sensor.ventilation_eva_co2_slope
+            name: CO2 Slope
           - entity: sensor.eva_co2_trend
             name: CO2 Trend
+          - entity: sensor.ventilation_eva_forecast_co2_30m
+            name: Forecast CO2 30m
           - entity: weather.forecast_home_assistant
             attribute: temperature
             name: Outdoor Temp
