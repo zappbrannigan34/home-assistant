@@ -129,6 +129,40 @@ sensor:
     keep_last_sample: true
     precision: 1
 
+  - platform: filter
+    name: "Ventilation CO2 Filtered"
+    unique_id: ventilation_co2_filtered
+    entity_id: sensor.sensor_zap_co2
+    filters:
+      - filter: lowpass
+        time_constant: 8
+        precision: 1
+
+  - platform: filter
+    name: "Ventilation Eva CO2 Filtered"
+    unique_id: ventilation_eva_co2_filtered
+    entity_id: sensor.sensor_eva_co2
+    filters:
+      - filter: lowpass
+        time_constant: 8
+        precision: 1
+
+  - platform: derivative
+    source: sensor.ventilation_co2_filtered
+    name: "Ventilation CO2 Slope"
+    unique_id: ventilation_co2_slope
+    round: 3
+    unit_time: min
+    time_window: "00:15:00"
+
+  - platform: derivative
+    source: sensor.ventilation_eva_co2_filtered
+    name: "Ventilation Eva CO2 Slope"
+    unique_id: ventilation_eva_co2_slope
+    round: 3
+    unit_time: min
+    time_window: "00:15:00"
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -139,11 +173,11 @@ template:
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
-        minutes: "/5"
+        minutes: "/1"
       - platform: state
         entity_id:
-          - sensor.ventilation_co2_mean_30m
-          - sensor.ventilation_co2_change_30m
+          - sensor.ventilation_co2_filtered
+          - sensor.ventilation_co2_slope
       - platform: homeassistant
         event: start
     sensor:
@@ -152,428 +186,206 @@ template:
         icon: mdi:trending-up
         availability: >
           {{ has_value('sensor.sensor_zap_co2') and
-             has_value('sensor.ventilation_co2_mean_30m') and
-             has_value('sensor.ventilation_co2_change_30m') }}
+             has_value('sensor.ventilation_co2_filtered') and
+             has_value('sensor.ventilation_co2_slope') }}
         state: >
-          {% set change_30m = states('sensor.ventilation_co2_change_30m') | float(0) %}
-          {% set trend_threshold = 30 %}
-          {% if change_30m > trend_threshold %}
+          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+          {% set trend_threshold = 0.5 %}
+          {% if slope > trend_threshold %}
             rising
-          {% elif change_30m < -trend_threshold %}
+          {% elif slope < -trend_threshold %}
             falling
           {% else %}
             stable
           {% endif %}
         attributes:
           current_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_co2_mean_30m') | float(0) }}"
-          co2_change_30m: "{{ states('sensor.ventilation_co2_change_30m') | float(0) }}"
-          trend_threshold_ppm: 30
-          window_minutes: 30
-          mean_age_coverage_ratio: "{{ state_attr('sensor.ventilation_co2_mean_30m', 'age_coverage_ratio') | default(0) }}"
-          change_age_coverage_ratio: "{{ state_attr('sensor.ventilation_co2_change_30m', 'age_coverage_ratio') | default(0) }}"
+          co2_filtered: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
+          co2_slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
+          trend_threshold_ppm_min: 0.5
+          filter_type: "ema_lowpass"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 2: РЕКОМЕНДУЕМАЯ ПОЗИЦИЯ ОКНА (30-минутный гибридный контур)
-  #  Оценка каждые 30 минут, шаг переменный по величине ошибки,
-  #  подтверждение требуется только в малой зоне около deadband
+  #  БЛОК 2: ZAP — FORECAST + CONTINUOUS RECOMMENDATION
+  #  Recommendation updates continuously from filtered CO2 and trend.
+  #  Physical movement stays in a separate 30-minute actuation layer.
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
-        minutes: "/30"
-        id: scheduled
+        minutes: "/1"
       - platform: state
         entity_id:
           - sensor.sensor_zap_co2
-          - sensor.ventilation_co2_mean_30m
-          - sensor.ventilation_co2_change_30m
-          - cover.ventilation_zap_group
+          - sensor.ventilation_co2_filtered
+          - sensor.ventilation_co2_slope
           - input_number.ventilation_target_co2
           - input_number.ventilation_min_position
           - input_number.ventilation_max_position
-        id: refresh
       - platform: homeassistant
         event: start
-        id: start
     sensor:
+      - name: "Ventilation Forecast CO2 30m"
+        unique_id: ventilation_forecast_co2_30m
+        unit_of_measurement: "ppm"
+        icon: mdi:chart-timeline-variant
+        availability: >
+          {{ has_value('sensor.sensor_zap_co2') and
+             has_value('sensor.ventilation_co2_filtered') and
+             has_value('sensor.ventilation_co2_slope') }}
+        state: >
+          {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
+          {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
+          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+          {{ (filtered + slope * 30) | round(1) }}
+        attributes:
+          raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
+          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
+          slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
+          forecast_horizon_min: 30
+
+      - name: "Ventilation Forecast Error 30m"
+        unique_id: ventilation_forecast_error_30m
+        unit_of_measurement: "ppm"
+        state_class: measurement
+        icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.ventilation_forecast_co2_30m') }}
+        state: >
+          {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(650) %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {{ (forecast - target) | round(0) }}
+        attributes:
+          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
+          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
+          deadband_ppm: 50
+
       - name: "Ventilation Recommended Position"
         unique_id: ventilation_recommended_position
         unit_of_measurement: "%"
         icon: mdi:window-open-variant
         availability: >
           {{ has_value('sensor.sensor_zap_co2') and
-             has_value('sensor.ventilation_co2_mean_30m') and
-             has_value('sensor.ventilation_co2_change_30m') and
-             has_value('sensor.co2_trend') and
+             has_value('sensor.ventilation_co2_filtered') and
+             has_value('sensor.ventilation_co2_slope') and
+             has_value('sensor.ventilation_forecast_error_30m') and
              has_value('cover.ventilation_zap_group') }}
         state: >
           {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-          {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-          {% set change_30m = states('sensor.ventilation_co2_change_30m') | float(0) %}
-          {% set trend = states('sensor.co2_trend') %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {% set current_pos = state_attr('cover.ventilation_zap_group', 'current_position') | int(0) %}
+          {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
+          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+          {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
+          {% set abs_forecast_error = forecast_error | abs %}
           {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
-          {% set evaluation_trigger = trigger.id | default('scheduled') %}
+          {% set current_pos = state_attr('cover.ventilation_zap_group', 'current_position') | int(min_pos) %}
           {% set previous_recommended = states('sensor.ventilation_recommended_position') %}
-          {% set has_previous_recommended = previous_recommended not in ['unknown', 'unavailable', 'none', ''] %}
-          {% set prev_pending_direction = state_attr('sensor.ventilation_recommended_position', 'pending_direction') | default('hold') %}
-          {% set prev_pending_count = state_attr('sensor.ventilation_recommended_position', 'pending_count') | default(0) | int(0) %}
-          {% if evaluation_trigger == 'refresh' and has_previous_recommended %}
-            {{ previous_recommended | int(current_pos) }}
-          {% elif evaluation_trigger == 'start' %}
-            {{ current_pos }}
+          {% set previous = previous_recommended | int(current_pos) if previous_recommended not in ['unknown', 'unavailable', 'none', ''] else current_pos %}
+          {% set deadband = 50 %}
+          {% set sharp_slope = 1.5 %}
+          {% set delta = 0 %}
+          {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
+          {% if abs_forecast_error <= deadband %}
+            {% if slope > sharp_slope %}
+              {% set delta = 2 %}
+            {% elif slope < -sharp_slope %}
+              {% set delta = -2 %}
+            {% endif %}
           {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set ns = namespace(step_band='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, immediate=false) %}
-
-            {# --- ГИБРИД С ПЕРЕМЕННЫМ ШАГОМ: частота фиксирована, шаг зависит от ошибки --- #}
-            {% if abs_error <= 40 %}
-              {% set ns.step_band = 'deadband' %}
-            {% elif abs_error <= 80 %}
-              {% set ns.step_band = 'small' %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set ns.candidate_step = 5 %}
-                {% set ns.candidate_direction = 'open_small' %}
-                {% set ns.confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set ns.candidate_step = -5 %}
-                {% set ns.candidate_direction = 'close_small' %}
-                {% set ns.confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% set ns.step_band = 'medium' %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set ns.candidate_step = 10 %}
-                {% set ns.candidate_direction = 'open_medium' %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set ns.candidate_step = -10 %}
-                {% set ns.candidate_direction = 'close_medium' %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% set ns.step_band = 'large' %}
-              {% if error > 0 %}
-                {% set ns.candidate_step = 20 %}
-                {% set ns.candidate_direction = 'open_large' %}
-                {% set ns.immediate = true %}
-              {% elif error < 0 %}
-                {% set ns.candidate_step = -20 %}
-                {% set ns.candidate_direction = 'close_large' %}
-                {% set ns.immediate = true %}
-              {% endif %}
-            {% else %}
-              {% set ns.step_band = 'extreme' %}
-              {% if error > 0 %}
-                {% set ns.candidate_step = 30 %}
-                {% set ns.candidate_direction = 'open_extreme' %}
-                {% set ns.immediate = true %}
-              {% elif error < 0 %}
-                {% set ns.candidate_step = -30 %}
-                {% set ns.candidate_direction = 'close_extreme' %}
-                {% set ns.immediate = true %}
-              {% endif %}
+            {% set error_over = abs_forecast_error - deadband %}
+            {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
+            {% if not trend_supports_error and abs_forecast_error <= 120 %}
+              {% set base_delta = base_delta * 0.5 %}
             {% endif %}
-
-            {# --- ПОДТВЕРЖДЕНИЕ НУЖНО ТОЛЬКО В МАЛОЙ ЗОНЕ --- #}
-            {% set confirmed_step = 0 %}
-            {% set pending_direction = 'hold' %}
-            {% set pending_count = 0 %}
-
-            {% if ns.candidate_step == 0 %}
-              {% set confirmed_step = 0 %}
-            {% elif ns.immediate %}
-              {% set confirmed_step = ns.candidate_step %}
-            {% elif not ns.confirmation_required %}
-              {% set confirmed_step = ns.candidate_step %}
+            {% set base_delta = [base_delta, 4.0] | min %}
+            {% if forecast_error > 0 %}
+              {% set delta = base_delta %}
             {% else %}
-              {% if prev_pending_direction == ns.candidate_direction %}
-                {% set pending_count = prev_pending_count + 1 %}
-              {% else %}
-                {% set pending_count = 1 %}
-              {% endif %}
-
-              {% if pending_count >= 2 %}
-                {% set confirmed_step = ns.candidate_step %}
-                {% set pending_count = 0 %}
-                {% set pending_direction = 'hold' %}
-              {% else %}
-                {% set pending_direction = ns.candidate_direction %}
-              {% endif %}
+              {% set delta = 0 - base_delta %}
             {% endif %}
-
-            {% set new_pos = current_pos + confirmed_step %}
-            {% set new_pos = [new_pos, min_pos] | max %}
-            {% set new_pos = [new_pos, max_pos] | min %}
-            {{ new_pos | int }}
           {% endif %}
+          {% set new_recommended = previous + delta %}
+          {% set new_recommended = [new_recommended, min_pos] | max %}
+          {% set new_recommended = [new_recommended, max_pos] | min %}
+          {{ new_recommended | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_co2_mean_30m') | float(0) }}"
-          co2_change_30m: "{{ states('sensor.ventilation_co2_change_30m') | float(0) }}"
-          trend: "{{ states('sensor.co2_trend') }}"
+          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
+          slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
+          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
+          forecast_error_30m: "{{ states('sensor.ventilation_forecast_error_30m') | float(0) }}"
           target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          error_ppm: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {{ (co2 - target) | round(0) }}
-          abs_error_ppm: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {{ ((co2 - target) | abs) | round(0) }}
-          step_band: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set abs_error = (co2 - target) | abs %}
-            {% if abs_error <= 40 %}
-              deadband
-            {% elif abs_error <= 80 %}
-              small
-            {% elif abs_error <= 140 %}
-              medium
-            {% elif abs_error <= 220 %}
-              large
-            {% else %}
-              extreme
-            {% endif %}
+          deadband_ppm: 50
+          sharp_slope_ppm_min: 1.5
           current_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | int(0) }}"
-          pending_direction: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              {{ prev_pending_direction }}
+          controller_mode: >
+            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
+            {% set abs_forecast_error = forecast_error | abs %}
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% if abs_forecast_error <= 50 %}
+              {% if slope > 1.5 %}
+                deadband_opening_bias
+              {% elif slope < -1.5 %}
+                deadband_closing_bias
+              {% else %}
+                deadband_hold
+              {% endif %}
+            {% elif forecast_error > 0 %}
+              opening_response
             {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
+              closing_response
+            {% endif %}
+          controller_delta: >
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
+            {% set abs_forecast_error = forecast_error | abs %}
+            {% set delta = 0 %}
+            {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
+            {% if abs_forecast_error <= 50 %}
+              {% if slope > 1.5 %}
+                {% set delta = 2 %}
+              {% elif slope < -1.5 %}
+                {% set delta = -2 %}
               {% endif %}
             {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
+              {% set error_over = abs_forecast_error - 50 %}
+              {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
+              {% if not trend_supports_error and abs_forecast_error <= 120 %}
+                {% set base_delta = base_delta * 0.5 %}
+              {% endif %}
+              {% set base_delta = [base_delta, 4.0] | min %}
+              {% if forecast_error > 0 %}
+                {% set delta = base_delta %}
+              {% else %}
+                {% set delta = 0 - base_delta %}
               {% endif %}
             {% endif %}
+            {{ delta | round(2) }}
 
-            {% if candidate_step == 0 or immediate or not confirmation_required %}
-              hold
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              hold
-            {% else %}
-              {{ candidate_direction }}
-            {% endif %}
-            {% endif %}
-          pending_count: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              {{ prev_pending_count }}
-            {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% endif %}
-
-            {% if candidate_step == 0 or immediate or not confirmation_required %}
-              0
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              0
-            {% elif prev_pending_direction == candidate_direction %}
-              {{ prev_pending_count + 1 }}
-            {% else %}
-              1
-            {% endif %}
-            {% endif %}
-          last_step: >
-            {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              0
-            {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% endif %}
-
-            {% if candidate_step == 0 %}
-              0
-            {% elif immediate or not confirmation_required %}
-              {{ candidate_step }}
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              {{ candidate_step }}
-            {% else %}
-              0
-            {% endif %}
-            {% endif %}
-
-      # ──────────────────────────────────────────────────────────────────────
-      #  ОШИБКА CO2 (для дашборда и диагностики)
-      # ──────────────────────────────────────────────────────────────────────
       - name: "Ventilation CO2 Error"
         unique_id: ventilation_co2_error
         unit_of_measurement: "ppm"
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.sensor_zap_co2') and has_value('sensor.ventilation_co2_mean_30m') }}
+          {{ has_value('sensor.ventilation_forecast_error_30m') }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-          {% set co2 = states('sensor.ventilation_co2_mean_30m') | float(raw_co2) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {{ (target - co2) | round(0) }}
+          {{ states('sensor.ventilation_forecast_error_30m') | float(0) | round(0) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_co2_mean_30m') | float(0) }}"
-          error_source: "co2_mean_30m"
+          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
+          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
+          error_source: "forecast_error_30m"
 
   # ════════════════════════════════════════════════════════════════════════════
   #  БЛОК 3: EVA — ДОЛГИЙ ТРЕНД CO2
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
-        minutes: "/5"
+        minutes: "/1"
       - platform: state
         entity_id:
-          - sensor.ventilation_eva_co2_mean_30m
-          - sensor.ventilation_eva_co2_change_30m
+          - sensor.ventilation_eva_co2_filtered
+          - sensor.ventilation_eva_co2_slope
       - platform: homeassistant
         event: start
     sensor:
@@ -582,392 +394,178 @@ template:
         icon: mdi:trending-up
         availability: >
           {{ has_value('sensor.sensor_eva_co2') and
-             has_value('sensor.ventilation_eva_co2_mean_30m') and
-             has_value('sensor.ventilation_eva_co2_change_30m') }}
+             has_value('sensor.ventilation_eva_co2_filtered') and
+             has_value('sensor.ventilation_eva_co2_slope') }}
         state: >
-          {% set change_30m = states('sensor.ventilation_eva_co2_change_30m') | float(0) %}
-          {% set trend_threshold = 30 %}
-          {% if change_30m > trend_threshold %}
+          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+          {% set trend_threshold = 0.5 %}
+          {% if slope > trend_threshold %}
             rising
-          {% elif change_30m < -trend_threshold %}
+          {% elif slope < -trend_threshold %}
             falling
           {% else %}
             stable
           {% endif %}
         attributes:
           current_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
-          co2_change_30m: "{{ states('sensor.ventilation_eva_co2_change_30m') | float(0) }}"
-          trend_threshold_ppm: 30
-          window_minutes: 30
-          mean_age_coverage_ratio: "{{ state_attr('sensor.ventilation_eva_co2_mean_30m', 'age_coverage_ratio') | default(0) }}"
-          change_age_coverage_ratio: "{{ state_attr('sensor.ventilation_eva_co2_change_30m', 'age_coverage_ratio') | default(0) }}"
+          co2_filtered: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
+          co2_slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
+          trend_threshold_ppm_min: 0.5
+          filter_type: "ema_lowpass"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 4: EVA — РЕКОМЕНДУЕМАЯ ПОЗИЦИЯ ОКНА
+  #  БЛОК 4: EVA — FORECAST + CONTINUOUS RECOMMENDATION
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
-        minutes: "/30"
-        id: scheduled
+        minutes: "/1"
       - platform: state
         entity_id:
           - sensor.sensor_eva_co2
-          - sensor.ventilation_eva_co2_mean_30m
-          - sensor.ventilation_eva_co2_change_30m
-          - cover.drivent_eva_driventokonnyi_privod
+          - sensor.ventilation_eva_co2_filtered
+          - sensor.ventilation_eva_co2_slope
           - input_number.ventilation_target_co2
           - input_number.ventilation_min_position
           - input_number.ventilation_max_position
-        id: refresh
       - platform: homeassistant
         event: start
-        id: start
     sensor:
+      - name: "Ventilation Eva Forecast CO2 30m"
+        unique_id: ventilation_eva_forecast_co2_30m
+        unit_of_measurement: "ppm"
+        icon: mdi:chart-timeline-variant
+        availability: >
+          {{ has_value('sensor.sensor_eva_co2') and
+             has_value('sensor.ventilation_eva_co2_filtered') and
+             has_value('sensor.ventilation_eva_co2_slope') }}
+        state: >
+          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
+          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
+          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+          {{ (filtered + slope * 30) | round(1) }}
+        attributes:
+          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
+          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
+          slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
+          forecast_horizon_min: 30
+
+      - name: "Ventilation Eva Forecast Error 30m"
+        unique_id: ventilation_eva_forecast_error_30m
+        unit_of_measurement: "ppm"
+        state_class: measurement
+        icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.ventilation_eva_forecast_co2_30m') }}
+        state: >
+          {% set forecast = states('sensor.ventilation_eva_forecast_co2_30m') | float(650) %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {{ (forecast - target) | round(0) }}
+        attributes:
+          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
+          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
+          deadband_ppm: 50
+
       - name: "Ventilation Eva Recommended Position"
         unique_id: ventilation_eva_recommended_position
         unit_of_measurement: "%"
         icon: mdi:window-open-variant
         availability: >
           {{ has_value('sensor.sensor_eva_co2') and
-             has_value('sensor.ventilation_eva_co2_mean_30m') and
-             has_value('sensor.ventilation_eva_co2_change_30m') and
-             has_value('sensor.eva_co2_trend') and
+             has_value('sensor.ventilation_eva_co2_filtered') and
+             has_value('sensor.ventilation_eva_co2_slope') and
+             has_value('sensor.ventilation_eva_forecast_error_30m') and
              has_value('cover.drivent_eva_driventokonnyi_privod') }}
         state: >
           {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-          {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-          {% set trend = states('sensor.eva_co2_trend') %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {% set current_pos = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) %}
+          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
+          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+          {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
+          {% set abs_forecast_error = forecast_error | abs %}
           {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
-          {% set evaluation_trigger = trigger.id | default('scheduled') %}
+          {% set current_pos = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(min_pos) %}
           {% set previous_recommended = states('sensor.ventilation_eva_recommended_position') %}
-          {% set has_previous_recommended = previous_recommended not in ['unknown', 'unavailable', 'none', ''] %}
-          {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
-          {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
-          {% if evaluation_trigger == 'refresh' and has_previous_recommended %}
-            {{ previous_recommended | int(current_pos) }}
-          {% elif evaluation_trigger == 'start' %}
-            {{ current_pos }}
+          {% set previous = previous_recommended | int(current_pos) if previous_recommended not in ['unknown', 'unavailable', 'none', ''] else current_pos %}
+          {% set deadband = 50 %}
+          {% set sharp_slope = 1.5 %}
+          {% set delta = 0 %}
+          {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
+          {% if abs_forecast_error <= deadband %}
+            {% if slope > sharp_slope %}
+              {% set delta = 2 %}
+            {% elif slope < -sharp_slope %}
+              {% set delta = -2 %}
+            {% endif %}
           {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set ns = namespace(step_band='deadband', candidate_step=0, candidate_direction='hold', confirmation_required=false, immediate=false) %}
-
-            {% if abs_error <= 40 %}
-              {% set ns.step_band = 'deadband' %}
-            {% elif abs_error <= 80 %}
-              {% set ns.step_band = 'small' %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set ns.candidate_step = 5 %}
-                {% set ns.candidate_direction = 'open_small' %}
-                {% set ns.confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set ns.candidate_step = -5 %}
-                {% set ns.candidate_direction = 'close_small' %}
-                {% set ns.confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% set ns.step_band = 'medium' %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set ns.candidate_step = 10 %}
-                {% set ns.candidate_direction = 'open_medium' %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set ns.candidate_step = -10 %}
-                {% set ns.candidate_direction = 'close_medium' %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% set ns.step_band = 'large' %}
-              {% if error > 0 %}
-                {% set ns.candidate_step = 20 %}
-                {% set ns.candidate_direction = 'open_large' %}
-                {% set ns.immediate = true %}
-              {% elif error < 0 %}
-                {% set ns.candidate_step = -20 %}
-                {% set ns.candidate_direction = 'close_large' %}
-                {% set ns.immediate = true %}
-              {% endif %}
-            {% else %}
-              {% set ns.step_band = 'extreme' %}
-              {% if error > 0 %}
-                {% set ns.candidate_step = 30 %}
-                {% set ns.candidate_direction = 'open_extreme' %}
-                {% set ns.immediate = true %}
-              {% elif error < 0 %}
-                {% set ns.candidate_step = -30 %}
-                {% set ns.candidate_direction = 'close_extreme' %}
-                {% set ns.immediate = true %}
-              {% endif %}
+            {% set error_over = abs_forecast_error - deadband %}
+            {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
+            {% if not trend_supports_error and abs_forecast_error <= 120 %}
+              {% set base_delta = base_delta * 0.5 %}
             {% endif %}
-
-            {% set confirmed_step = 0 %}
-            {% set pending_direction = 'hold' %}
-            {% set pending_count = 0 %}
-
-            {% if ns.candidate_step == 0 %}
-              {% set confirmed_step = 0 %}
-            {% elif ns.immediate %}
-              {% set confirmed_step = ns.candidate_step %}
-            {% elif not ns.confirmation_required %}
-              {% set confirmed_step = ns.candidate_step %}
+            {% set base_delta = [base_delta, 4.0] | min %}
+            {% if forecast_error > 0 %}
+              {% set delta = base_delta %}
             {% else %}
-              {% if prev_pending_direction == ns.candidate_direction %}
-                {% set pending_count = prev_pending_count + 1 %}
-              {% else %}
-                {% set pending_count = 1 %}
-              {% endif %}
-
-              {% if pending_count >= 2 %}
-                {% set confirmed_step = ns.candidate_step %}
-                {% set pending_count = 0 %}
-                {% set pending_direction = 'hold' %}
-              {% else %}
-                {% set pending_direction = ns.candidate_direction %}
-              {% endif %}
+              {% set delta = 0 - base_delta %}
             {% endif %}
-
-            {% set new_pos = current_pos + confirmed_step %}
-            {% set new_pos = [new_pos, min_pos] | max %}
-            {% set new_pos = [new_pos, max_pos] | min %}
-            {{ new_pos | int }}
           {% endif %}
+          {% set new_recommended = previous + delta %}
+          {% set new_recommended = [new_recommended, min_pos] | max %}
+          {% set new_recommended = [new_recommended, max_pos] | min %}
+          {{ new_recommended | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
-          co2_change_30m: "{{ states('sensor.ventilation_eva_co2_change_30m') | float(0) }}"
-          trend: "{{ states('sensor.eva_co2_trend') }}"
+          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
+          slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
+          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
+          forecast_error_30m: "{{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) }}"
           target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          error_ppm: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {{ (co2 - target) | round(0) }}
-          abs_error_ppm: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {{ ((co2 - target) | abs) | round(0) }}
-          step_band: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set abs_error = (co2 - target) | abs %}
-            {% if abs_error <= 40 %}
-              deadband
-            {% elif abs_error <= 80 %}
-              small
-            {% elif abs_error <= 140 %}
-              medium
-            {% elif abs_error <= 220 %}
-              large
-            {% else %}
-              extreme
-            {% endif %}
+          deadband_ppm: 50
+          sharp_slope_ppm_min: 1.5
           current_position: "{{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) }}"
-          pending_direction: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.eva_co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              {{ prev_pending_direction }}
+          controller_mode: >
+            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
+            {% set abs_forecast_error = forecast_error | abs %}
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {% if abs_forecast_error <= 50 %}
+              {% if slope > 1.5 %}
+                deadband_opening_bias
+              {% elif slope < -1.5 %}
+                deadband_closing_bias
+              {% else %}
+                deadband_hold
+              {% endif %}
+            {% elif forecast_error > 0 %}
+              opening_response
             {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
+              closing_response
+            {% endif %}
+          controller_delta: >
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
+            {% set abs_forecast_error = forecast_error | abs %}
+            {% set delta = 0 %}
+            {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
+            {% if abs_forecast_error <= 50 %}
+              {% if slope > 1.5 %}
+                {% set delta = 2 %}
+              {% elif slope < -1.5 %}
+                {% set delta = -2 %}
               {% endif %}
             {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
+              {% set error_over = abs_forecast_error - 50 %}
+              {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
+              {% if not trend_supports_error and abs_forecast_error <= 120 %}
+                {% set base_delta = base_delta * 0.5 %}
+              {% endif %}
+              {% set base_delta = [base_delta, 4.0] | min %}
+              {% if forecast_error > 0 %}
+                {% set delta = base_delta %}
+              {% else %}
+                {% set delta = 0 - base_delta %}
               {% endif %}
             {% endif %}
-
-            {% if candidate_step == 0 or immediate or not confirmation_required %}
-              hold
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              hold
-            {% else %}
-              {{ candidate_direction }}
-            {% endif %}
-            {% endif %}
-          pending_count: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.eva_co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              {{ prev_pending_count }}
-            {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% endif %}
-
-            {% if candidate_step == 0 or immediate or not confirmation_required %}
-              0
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              0
-            {% elif prev_pending_direction == candidate_direction %}
-              {{ prev_pending_count + 1 }}
-            {% else %}
-              1
-            {% endif %}
-            {% endif %}
-          last_step: >
-            {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-            {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-            {% set trend = states('sensor.eva_co2_trend') %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set evaluation_trigger = trigger.id | default('scheduled') %}
-            {% set prev_pending_direction = state_attr('sensor.ventilation_eva_recommended_position', 'pending_direction') | default('hold') %}
-            {% set prev_pending_count = state_attr('sensor.ventilation_eva_recommended_position', 'pending_count') | default(0) | int(0) %}
-            {% if evaluation_trigger != 'scheduled' %}
-              0
-            {% else %}
-            {% set error = (co2 - target) | float(0) %}
-            {% set abs_error = error | abs %}
-            {% set candidate_direction = 'hold' %}
-            {% set candidate_step = 0 %}
-            {% set confirmation_required = false %}
-            {% set immediate = false %}
-            {% if abs_error <= 40 %}
-            {% elif abs_error <= 80 %}
-              {% if error > 0 and trend == 'rising' %}
-                {% set candidate_direction = 'open_small' %}
-                {% set candidate_step = 5 %}
-                {% set confirmation_required = true %}
-              {% elif error < 0 and trend == 'falling' %}
-                {% set candidate_direction = 'close_small' %}
-                {% set candidate_step = -5 %}
-                {% set confirmation_required = true %}
-              {% endif %}
-            {% elif abs_error <= 140 %}
-              {% if error > 0 and trend in ['rising', 'stable'] %}
-                {% set candidate_direction = 'open_medium' %}
-                {% set candidate_step = 10 %}
-              {% elif error < 0 and trend in ['falling', 'stable'] %}
-                {% set candidate_direction = 'close_medium' %}
-                {% set candidate_step = -10 %}
-              {% endif %}
-            {% elif abs_error <= 220 %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_large' %}
-                {% set candidate_step = 20 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_large' %}
-                {% set candidate_step = -20 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% else %}
-              {% if error > 0 %}
-                {% set candidate_direction = 'open_extreme' %}
-                {% set candidate_step = 30 %}
-                {% set immediate = true %}
-              {% elif error < 0 %}
-                {% set candidate_direction = 'close_extreme' %}
-                {% set candidate_step = -30 %}
-                {% set immediate = true %}
-              {% endif %}
-            {% endif %}
-
-            {% if candidate_step == 0 %}
-              0
-            {% elif immediate or not confirmation_required %}
-              {{ candidate_step }}
-            {% elif prev_pending_direction == candidate_direction and (prev_pending_count + 1) >= 2 %}
-              {{ candidate_step }}
-            {% else %}
-              0
-            {% endif %}
-            {% endif %}
+            {{ delta | round(2) }}
 
       - name: "Ventilation Eva CO2 Error"
         unique_id: ventilation_eva_co2_error
@@ -975,16 +573,14 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.sensor_eva_co2') and has_value('sensor.ventilation_eva_co2_mean_30m') }}
+          {{ has_value('sensor.ventilation_eva_forecast_error_30m') }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-          {% set co2 = states('sensor.ventilation_eva_co2_mean_30m') | float(raw_co2) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {{ (target - co2) | round(0) }}
+          {{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) | round(0) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          co2_mean_30m: "{{ states('sensor.ventilation_eva_co2_mean_30m') | float(0) }}"
-          error_source: "co2_mean_30m"
+          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
+          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
+          error_source: "forecast_error_30m"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
@@ -1002,8 +598,8 @@ automation:
     initial_state: true
 
     trigger:
-      - platform: state
-        entity_id: sensor.ventilation_recommended_position
+      - platform: time_pattern
+        minutes: "/30"
 
     condition:
       # Позиция реально изменилась
@@ -1140,6 +736,12 @@ automation:
         target:
           entity_id: cover.ventilation_zap_group
 
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ventilation_last_adjustment
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
       - service: notify.zapgroup
         data:
           title: "🪟 Окно закрыто (безопасность)"
@@ -1194,8 +796,8 @@ automation:
     initial_state: true
 
     trigger:
-      - platform: state
-        entity_id: sensor.ventilation_eva_recommended_position
+      - platform: time_pattern
+        minutes: "/30"
 
     condition:
       - condition: template
@@ -1306,6 +908,12 @@ automation:
       - service: cover.close_cover
         target:
           entity_id: cover.drivent_eva_driventokonnyi_privod
+
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ventilation_eva_last_adjustment
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
       - service: notify.zapgroup
         data:
