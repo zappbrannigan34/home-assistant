@@ -1,11 +1,12 @@
 # package: ventilation_multiroom
-# Version: 1.2.0
-# Last Updated: 2026-04-13
-# Description: Hybrid long-horizon CO2 ventilation control for zap/eva rooms
+# Version: 2.0.0
+# Last Updated: 2026-04-22
+# Description: Per-room equilibrium-seeking CO2 ventilation control for zap/eva rooms
 #
-# АЛГОРИТМ: Гибридное управление по сглаженному CO2, длинному тренду и переменному шагу.
-# НЕ PID — привод двигается не чаще одного раза в 30 минут, но размер шага зависит от величины ошибки.
-# Малые ошибки подтверждаются трендом, большие ошибки двигаются сразу более крупным шагом.
+# АЛГОРИТМ: Отдельный room-local PI-style controller для каждой комнаты.
+# Controller layer считает demand непрерывно по filtered CO2 error,
+# а actuator layer отдельно применяет это demand не чаще одного раза в 30 минут.
+# Коэффициенты не задаются руками — они оцениваются из наблюдаемой динамики комнаты.
 #
 # РЕСУРС ПРИВОДА: WindowMaster рейтинг ~10 000 циклов.
 # С длинным тренд-фильтром: реальных движений заметно меньше, чем при коротком шумном контуре.
@@ -51,6 +52,64 @@ input_number:
     step: 1
     unit_of_measurement: "°C"
     icon: mdi:thermometer-alert
+    mode: box
+
+  ventilation_deadband_ppm:
+    name: "Ventilation Deadband PPM"
+    min: 10
+    max: 150
+    step: 5
+    initial: 50
+    unit_of_measurement: "ppm"
+    icon: mdi:arrow-left-right
+    mode: box
+
+  ventilation_eva_target_co2:
+    name: "Ventilation Eva Target CO2"
+    min: 300
+    max: 1000
+    step: 50
+    initial: 650
+    unit_of_measurement: "ppm"
+    icon: mdi:molecule-co2
+    mode: box
+
+  ventilation_eva_min_position:
+    name: "Ventilation Eva Min Position"
+    min: 0
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:arrow-collapse-down
+    mode: box
+
+  ventilation_eva_max_position:
+    name: "Ventilation Eva Max Position"
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    icon: mdi:arrow-collapse-up
+    mode: box
+
+  ventilation_eva_min_outdoor_temp:
+    name: "Ventilation Eva Min Outdoor Temp"
+    min: -30
+    max: 10
+    step: 1
+    initial: -10
+    unit_of_measurement: "°C"
+    icon: mdi:thermometer-alert
+    mode: box
+
+  ventilation_eva_deadband_ppm:
+    name: "Ventilation Eva Deadband PPM"
+    min: 10
+    max: 150
+    step: 5
+    initial: 50
+    unit_of_measurement: "ppm"
+    icon: mdi:arrow-left-right
     mode: box
 
 input_datetime:
@@ -206,9 +265,7 @@ template:
           filter_type: "ema_lowpass"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 2: ZAP — FORECAST + CONTINUOUS RECOMMENDATION
-  #  Recommendation updates continuously from filtered CO2 and trend.
-  #  Physical movement stays in a separate 30-minute actuation layer.
+  #  БЛОК 2: ZAP — 10m forecast + equilibrium-seeking PI-style controller
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
@@ -221,6 +278,9 @@ template:
           - input_number.ventilation_target_co2
           - input_number.ventilation_min_position
           - input_number.ventilation_max_position
+          - input_number.ventilation_deadband_ppm
+          - cover.ventilation_zap_group
+          - input_datetime.ventilation_last_adjustment
       - platform: homeassistant
         event: start
     sensor:
@@ -236,12 +296,12 @@ template:
           {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
           {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
           {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-          {{ (filtered + slope * 30) | round(1) }}
+          {{ (filtered + slope * 10) | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
           slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
-          forecast_horizon_min: 30
+          forecast_horizon_min: 10
 
       - name: "Ventilation Forecast Error 30m"
         unique_id: ventilation_forecast_error_30m
@@ -267,46 +327,83 @@ template:
           {{ has_value('sensor.sensor_zap_co2') and
              has_value('sensor.ventilation_co2_filtered') and
              has_value('sensor.ventilation_co2_slope') and
-             has_value('sensor.ventilation_forecast_error_30m') and
-             has_value('cover.ventilation_zap_group') }}
+             has_value('sensor.ventilation_forecast_error_30m') }}
         state: >
           {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
           {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
           {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-          {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
-          {% set abs_forecast_error = forecast_error | abs %}
+          {% set forecast_co2 = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
           {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
-          {% set current_pos = state_attr('cover.ventilation_zap_group', 'current_position') | int(min_pos) %}
-          {% set previous_recommended = states('sensor.ventilation_recommended_position') %}
-          {% set previous = previous_recommended | int(current_pos) if previous_recommended not in ['unknown', 'unavailable', 'none', ''] else current_pos %}
-          {% set deadband = 50 %}
-          {% set sharp_slope = 1.5 %}
-          {% set delta = 0 %}
-          {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
-          {% if abs_forecast_error <= deadband %}
-            {% if slope > sharp_slope %}
-              {% set delta = 2 %}
-            {% elif slope < -sharp_slope %}
-              {% set delta = -2 %}
-            {% endif %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+          {% set forecast_error = forecast_co2 - target %}
+          {% set error = filtered - target %}
+          {% set range_span = [max_pos - min_pos, 0] | max %}
+          {% set applied_position = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
+          {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+          {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+          {% set previous_closed_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+          {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
+            {% set closed_load = (previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15) %}
+          {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
+            {% set closed_load = (previous_closed_load * 0.97) + 0.003 %}
           {% else %}
-            {% set error_over = abs_forecast_error - deadband %}
-            {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
-            {% if not trend_supports_error and abs_forecast_error <= 120 %}
-              {% set base_delta = base_delta * 0.5 %}
-            {% endif %}
-            {% set base_delta = [base_delta, 4.0] | min %}
-            {% if forecast_error > 0 %}
-              {% set delta = base_delta %}
-            {% else %}
-              {% set delta = 0 - base_delta %}
-            {% endif %}
+            {% set closed_load = previous_closed_load %}
           {% endif %}
-          {% set new_recommended = previous + delta %}
-          {% set new_recommended = [new_recommended, min_pos] | max %}
-          {% set new_recommended = [new_recommended, max_pos] | min %}
-          {{ new_recommended | round(1) }}
+
+          {% set previous_vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+          {% if applied_fraction >= 0.20 %}
+            {% set vent_gain_sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
+            {% set vent_gain_sample = [vent_gain_sample, 0.05] | max %}
+            {% set vent_gain = (previous_vent_gain * 0.85) + (vent_gain_sample * 0.15) %}
+          {% else %}
+            {% set vent_gain = previous_vent_gain %}
+          {% endif %}
+
+          {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(25) %}
+          {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
+            {% set tau_sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
+            {% set tau_sample = [[tau_sample, 6] | max, 90] | min %}
+            {% set tau_estimate = (previous_tau * 0.85) + (tau_sample * 0.15) %}
+          {% else %}
+            {% set tau_estimate = previous_tau %}
+          {% endif %}
+
+          {% set equilibrium_fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
+          {% set equilibrium_opening = min_pos + (range_span * equilibrium_fraction) %}
+
+          {% set kp_auto = (0.80 * range_span) / ([vent_gain * tau_estimate, 5] | max) %}
+          {% set kp_auto = [[kp_auto, 0.005] | max, 0.25] | min %}
+          {% set ti_auto = [[tau_estimate * 1.20, 12] | max, 90] | min %}
+          {% set ki_auto = kp_auto / ti_auto %}
+
+          {% set error_outside_deadband = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+          {% set forecast_delta = forecast_error - error %}
+          {% set forecast_assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+          {% set forecast_assist = [[forecast_assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+
+          {% set previous_integral = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
+          {% set previous_demand = states('sensor.ventilation_recommended_position') | float(applied_position) %}
+          {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
+          {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+          {% set unclamped_without_integral = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist %}
+
+          {% if gate_blocked %}
+            {% set integral_term = previous_integral * 0.995 %}
+          {% elif (unclamped_without_integral <= min_pos and error_outside_deadband < 0) or (unclamped_without_integral >= max_pos and error_outside_deadband > 0) %}
+            {% set integral_term = previous_integral * 0.98 %}
+          {% elif (error | abs) <= deadband %}
+            {% set integral_term = previous_integral * 0.98 %}
+          {% else %}
+            {% set integral_term = previous_integral + (ki_auto * error_outside_deadband) %}
+          {% endif %}
+
+          {% set integral_limit = range_span * 0.80 %}
+          {% set integral_term = [[integral_term, 0 - integral_limit] | max, integral_limit] | min %}
+          {% set raw_output = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist + integral_term %}
+          {% set recommended = [[raw_output, min_pos] | max, max_pos] | min %}
+          {{ recommended | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
@@ -314,52 +411,189 @@ template:
           forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
           forecast_error_30m: "{{ states('sensor.ventilation_forecast_error_30m') | float(0) }}"
           target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          deadband_ppm: 50
-          sharp_slope_ppm_min: 1.5
-          current_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | int(0) }}"
+          min_position: "{{ states('input_number.ventilation_min_position') | int(0) }}"
+          max_position: "{{ states('input_number.ventilation_max_position') | int(80) }}"
+          deadband_ppm: "{{ states('input_number.ventilation_deadband_ppm') | float(50) }}"
+          controller_family: room_pi_auto_identified
+          current_applied_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) }}"
           controller_mode: >
-            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
-            {% set abs_forecast_error = forecast_error | abs %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% if abs_forecast_error <= 50 %}
-              {% if slope > 1.5 %}
-                deadband_opening_bias
-              {% elif slope < -1.5 %}
-                deadband_closing_bias
-              {% else %}
-                deadband_hold
-              {% endif %}
-            {% elif forecast_error > 0 %}
-              opening_response
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% set error = filtered - target %}
+            {% if error > deadband %}
+              opening_to_reduce_co2
+            {% elif error < (0 - deadband) %}
+              closing_to_hold_heat
             {% else %}
-              closing_response
+              holding_equilibrium
             {% endif %}
-          controller_delta: >
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
-            {% set abs_forecast_error = forecast_error | abs %}
-            {% set delta = 0 %}
-            {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
-            {% if abs_forecast_error <= 50 %}
-              {% if slope > 1.5 %}
-                {% set delta = 2 %}
-              {% elif slope < -1.5 %}
-                {% set delta = -2 %}
-              {% endif %}
+          dead_zone_state: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% if ((filtered - target) | abs) <= deadband %}
+              inside_dead_zone
             {% else %}
-              {% set error_over = abs_forecast_error - 50 %}
-              {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
-              {% if not trend_supports_error and abs_forecast_error <= 120 %}
-                {% set base_delta = base_delta * 0.5 %}
-              {% endif %}
-              {% set base_delta = [base_delta, 4.0] | min %}
-              {% if forecast_error > 0 %}
-                {% set delta = base_delta %}
-              {% else %}
-                {% set delta = 0 - base_delta %}
-              {% endif %}
+              outside_dead_zone
             {% endif %}
-            {{ delta | round(2) }}
+          anti_windup_state: >
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set applied_position = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
+            {% set previous_demand = states('sensor.ventilation_recommended_position') | float(applied_position) %}
+            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
+            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+            {% if gate_blocked %}
+              gated_freeze
+            {% elif (error | abs) <= deadband %}
+              deadband_decay
+            {% else %}
+              active_integrating
+            {% endif %}
+          error_outside_deadband_ppm: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% set error = filtered - target %}
+            {{ (0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1)) | round(1) }}
+          forecast_assist_pct: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
+            {% set error = filtered - target %}
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set forecast_delta = forecast_error - error %}
+            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+            {{ ([[assist, -0.20 * range_span] | max, 0.20 * range_span] | min) | round(2) }}
+          closed_load_estimate_ppm_min: >
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set applied_position = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
+            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+            {% set previous_closed_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
+              {{ ((previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15)) | round(3) }}
+            {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
+              {{ ((previous_closed_load * 0.97) + 0.003) | round(3) }}
+            {% else %}
+              {{ previous_closed_load | round(3) }}
+            {% endif %}
+          vent_gain_estimate_ppm_min_per_fraction: >
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set applied_position = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
+            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% set closed_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set previous_vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% if applied_fraction >= 0.20 %}
+              {% set sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
+              {% set sample = [sample, 0.05] | max %}
+              {{ ((previous_vent_gain * 0.85) + (sample * 0.15)) | round(3) }}
+            {% else %}
+              {{ previous_vent_gain | round(3) }}
+            {% endif %}
+          tau_estimate_min: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
+            {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
+              {% set sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
+              {% set sample = [[sample, 6] | max, 90] | min %}
+              {{ ((previous_tau * 0.85) + (sample * 0.15)) | round(2) }}
+            {% else %}
+              {{ previous_tau | round(2) }}
+            {% endif %}
+          kp_auto_pct_per_ppm: >
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% set kp = (0.80 * range_span) / ([vent_gain * tau, 5] | max) %}
+            {{ ([[kp, 0.005] | max, 0.25] | min) | round(4) }}
+          ki_auto_pct_per_ppm_min: >
+            {% set kp = state_attr('sensor.ventilation_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% set ti = [[tau * 1.20, 12] | max, 90] | min %}
+            {{ (kp / ti) | round(5) }}
+          equilibrium_opening: >
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set closed_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
+            {{ (min_pos + (range_span * fraction)) | round(2) }}
+          integral_term: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set previous_integral = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
+            {% set applied_position = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
+            {% set previous_demand = states('sensor.ventilation_recommended_position') | float(applied_position) %}
+            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
+            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+            {% set equilibrium = state_attr('sensor.ventilation_recommended_position', 'equilibrium_opening') | float(min_pos) %}
+            {% set kp = state_attr('sensor.ventilation_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set ki = state_attr('sensor.ventilation_recommended_position', 'ki_auto_pct_per_ppm_min') | float(0.002) %}
+            {% set vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(error) %}
+            {% set forecast_delta = forecast_error - error %}
+            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+            {% set unclamped = equilibrium + (kp * error_outside) + assist %}
+            {% if gate_blocked %}
+              {% set new_integral = previous_integral * 0.995 %}
+            {% elif (unclamped <= min_pos and error_outside < 0) or (unclamped >= max_pos and error_outside > 0) %}
+              {% set new_integral = previous_integral * 0.98 %}
+            {% elif (error | abs) <= deadband %}
+              {% set new_integral = previous_integral * 0.98 %}
+            {% else %}
+              {% set new_integral = previous_integral + (ki * error_outside) %}
+            {% endif %}
+            {% set integral_limit = range_span * 0.80 %}
+            {{ ([[new_integral, 0 - integral_limit] | max, integral_limit] | min) | round(3) }}
+          raw_controller_output: >
+            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
+            {% set forecast_error = states('sensor.ventilation_forecast_error_30m') | float(0) %}
+            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+            {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set equilibrium = state_attr('sensor.ventilation_recommended_position', 'equilibrium_opening') | float(min_pos) %}
+            {% set kp = state_attr('sensor.ventilation_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set vent_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set assist = ((forecast_error - error) / ([vent_gain * 10, 1] | max)) * range_span %}
+            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+            {% set integral_term = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
+            {% set raw_output = equilibrium + (kp * error_outside) + assist + integral_term %}
+            {{ raw_output | round(2) }}
 
       - name: "Ventilation CO2 Error"
         unique_id: ventilation_co2_error
@@ -367,14 +601,17 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_forecast_error_30m') }}
+          {{ has_value('sensor.ventilation_co2_filtered') }}
         state: >
-          {{ states('sensor.ventilation_forecast_error_30m') | float(0) | round(0) }}
+          {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
+          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {{ (filtered - target) | round(0) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
           forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
-          error_source: "forecast_error_30m"
+          forecast_error_10m: "{{ states('sensor.ventilation_forecast_error_30m') | float(0) }}"
+          error_source: "filtered_co2_error"
 
   # ════════════════════════════════════════════════════════════════════════════
   #  БЛОК 3: EVA — ДОЛГИЙ ТРЕНД CO2
@@ -414,7 +651,7 @@ template:
           filter_type: "ema_lowpass"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 4: EVA — FORECAST + CONTINUOUS RECOMMENDATION
+  #  БЛОК 4: EVA — room-local 10m forecast + auto-identified PI controller
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
@@ -424,9 +661,12 @@ template:
           - sensor.sensor_eva_co2
           - sensor.ventilation_eva_co2_filtered
           - sensor.ventilation_eva_co2_slope
-          - input_number.ventilation_target_co2
-          - input_number.ventilation_min_position
-          - input_number.ventilation_max_position
+          - input_number.ventilation_eva_target_co2
+          - input_number.ventilation_eva_min_position
+          - input_number.ventilation_eva_max_position
+          - input_number.ventilation_eva_deadband_ppm
+          - cover.drivent_eva_driventokonnyi_privod
+          - input_datetime.ventilation_eva_last_adjustment
       - platform: homeassistant
         event: start
     sensor:
@@ -442,12 +682,12 @@ template:
           {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
           {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
           {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-          {{ (filtered + slope * 30) | round(1) }}
+          {{ (filtered + slope * 10) | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
           slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
-          forecast_horizon_min: 30
+          forecast_horizon_min: 10
 
       - name: "Ventilation Eva Forecast Error 30m"
         unique_id: ventilation_eva_forecast_error_30m
@@ -458,12 +698,12 @@ template:
           {{ has_value('sensor.ventilation_eva_forecast_co2_30m') }}
         state: >
           {% set forecast = states('sensor.ventilation_eva_forecast_co2_30m') | float(650) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
+          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
           {{ (forecast - target) | round(0) }}
         attributes:
           forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          deadband_ppm: 50
+          target: "{{ states('input_number.ventilation_eva_target_co2') | float(650) }}"
+          deadband_ppm: "{{ states('input_number.ventilation_eva_deadband_ppm') | float(50) }}"
 
       - name: "Ventilation Eva Recommended Position"
         unique_id: ventilation_eva_recommended_position
@@ -473,99 +713,269 @@ template:
           {{ has_value('sensor.sensor_eva_co2') and
              has_value('sensor.ventilation_eva_co2_filtered') and
              has_value('sensor.ventilation_eva_co2_slope') and
-             has_value('sensor.ventilation_eva_forecast_error_30m') and
-             has_value('cover.drivent_eva_driventokonnyi_privod') }}
+             has_value('sensor.ventilation_eva_forecast_error_30m') }}
         state: >
           {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
           {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
           {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-          {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
-          {% set abs_forecast_error = forecast_error | abs %}
-          {% set min_pos = states('input_number.ventilation_min_position') | int(0) %}
-          {% set max_pos = states('input_number.ventilation_max_position') | int(80) %}
-          {% set current_pos = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(min_pos) %}
-          {% set previous_recommended = states('sensor.ventilation_eva_recommended_position') %}
-          {% set previous = previous_recommended | int(current_pos) if previous_recommended not in ['unknown', 'unavailable', 'none', ''] else current_pos %}
-          {% set deadband = 50 %}
-          {% set sharp_slope = 1.5 %}
-          {% set delta = 0 %}
-          {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
-          {% if abs_forecast_error <= deadband %}
-            {% if slope > sharp_slope %}
-              {% set delta = 2 %}
-            {% elif slope < -sharp_slope %}
-              {% set delta = -2 %}
-            {% endif %}
+          {% set forecast_co2 = states('sensor.ventilation_eva_forecast_co2_30m') | float(filtered) %}
+          {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+          {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+          {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+          {% set forecast_error = forecast_co2 - target %}
+          {% set error = filtered - target %}
+          {% set range_span = [max_pos - min_pos, 0] | max %}
+          {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
+          {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+          {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+          {% set previous_closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+          {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
+            {% set closed_load = (previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15) %}
+          {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
+            {% set closed_load = (previous_closed_load * 0.97) + 0.003 %}
           {% else %}
-            {% set error_over = abs_forecast_error - deadband %}
-            {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
-            {% if not trend_supports_error and abs_forecast_error <= 120 %}
-              {% set base_delta = base_delta * 0.5 %}
-            {% endif %}
-            {% set base_delta = [base_delta, 4.0] | min %}
-            {% if forecast_error > 0 %}
-              {% set delta = base_delta %}
-            {% else %}
-              {% set delta = 0 - base_delta %}
-            {% endif %}
+            {% set closed_load = previous_closed_load %}
           {% endif %}
-          {% set new_recommended = previous + delta %}
-          {% set new_recommended = [new_recommended, min_pos] | max %}
-          {% set new_recommended = [new_recommended, max_pos] | min %}
-          {{ new_recommended | round(1) }}
+
+          {% set previous_vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+          {% if applied_fraction >= 0.20 %}
+            {% set vent_gain_sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
+            {% set vent_gain_sample = [vent_gain_sample, 0.05] | max %}
+            {% set vent_gain = (previous_vent_gain * 0.85) + (vent_gain_sample * 0.15) %}
+          {% else %}
+            {% set vent_gain = previous_vent_gain %}
+          {% endif %}
+
+          {% set previous_tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
+          {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
+            {% set tau_sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
+            {% set tau_sample = [[tau_sample, 6] | max, 90] | min %}
+            {% set tau_estimate = (previous_tau * 0.85) + (tau_sample * 0.15) %}
+          {% else %}
+            {% set tau_estimate = previous_tau %}
+          {% endif %}
+
+          {% set equilibrium_fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
+          {% set equilibrium_opening = min_pos + (range_span * equilibrium_fraction) %}
+          {% set kp_auto = (0.80 * range_span) / ([vent_gain * tau_estimate, 5] | max) %}
+          {% set kp_auto = [[kp_auto, 0.005] | max, 0.25] | min %}
+          {% set ti_auto = [[tau_estimate * 1.20, 12] | max, 90] | min %}
+          {% set ki_auto = kp_auto / ti_auto %}
+          {% set error_outside_deadband = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+          {% set forecast_delta = forecast_error - error %}
+          {% set forecast_assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+          {% set forecast_assist = [[forecast_assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+          {% set previous_integral = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
+          {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
+          {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
+          {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+          {% set unclamped_without_integral = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist %}
+          {% if gate_blocked %}
+            {% set integral_term = previous_integral * 0.995 %}
+          {% elif (unclamped_without_integral <= min_pos and error_outside_deadband < 0) or (unclamped_without_integral >= max_pos and error_outside_deadband > 0) %}
+            {% set integral_term = previous_integral * 0.98 %}
+          {% elif (error | abs) <= deadband %}
+            {% set integral_term = previous_integral * 0.98 %}
+          {% else %}
+            {% set integral_term = previous_integral + (ki_auto * error_outside_deadband) %}
+          {% endif %}
+          {% set integral_limit = range_span * 0.80 %}
+          {% set integral_term = [[integral_term, 0 - integral_limit] | max, integral_limit] | min %}
+          {% set raw_output = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist + integral_term %}
+          {% set recommended = [([raw_output, min_pos] | max), max_pos] | min %}
+          {{ recommended | round(1) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
           slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
           forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
           forecast_error_30m: "{{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          deadband_ppm: 50
-          sharp_slope_ppm_min: 1.5
-          current_position: "{{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) }}"
+          target: "{{ states('input_number.ventilation_eva_target_co2') | float(650) }}"
+          min_position: "{{ states('input_number.ventilation_eva_min_position') | int(0) }}"
+          max_position: "{{ states('input_number.ventilation_eva_max_position') | int(80) }}"
+          deadband_ppm: "{{ states('input_number.ventilation_eva_deadband_ppm') | float(50) }}"
+          controller_family: room_pi_auto_identified
+          current_applied_position: "{{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(0) }}"
           controller_mode: >
-            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
-            {% set abs_forecast_error = forecast_error | abs %}
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {% if abs_forecast_error <= 50 %}
-              {% if slope > 1.5 %}
-                deadband_opening_bias
-              {% elif slope < -1.5 %}
-                deadband_closing_bias
-              {% else %}
-                deadband_hold
-              {% endif %}
-            {% elif forecast_error > 0 %}
-              opening_response
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% set error = filtered - target %}
+            {% if error > deadband %}
+              opening_to_reduce_co2
+            {% elif error < (0 - deadband) %}
+              closing_to_hold_heat
             {% else %}
-              closing_response
+              holding_equilibrium
             {% endif %}
-          controller_delta: >
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
-            {% set abs_forecast_error = forecast_error | abs %}
-            {% set delta = 0 %}
-            {% set trend_supports_error = (forecast_error > 0 and slope > 0) or (forecast_error < 0 and slope < 0) %}
-            {% if abs_forecast_error <= 50 %}
-              {% if slope > 1.5 %}
-                {% set delta = 2 %}
-              {% elif slope < -1.5 %}
-                {% set delta = -2 %}
-              {% endif %}
+          dead_zone_state: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% if ((filtered - target) | abs) <= deadband %}
+              inside_dead_zone
             {% else %}
-              {% set error_over = abs_forecast_error - 50 %}
-              {% set base_delta = 0.5 + (error_over / 80) + ((slope | abs) / 1.2) %}
-              {% if not trend_supports_error and abs_forecast_error <= 120 %}
-                {% set base_delta = base_delta * 0.5 %}
-              {% endif %}
-              {% set base_delta = [base_delta, 4.0] | min %}
-              {% if forecast_error > 0 %}
-                {% set delta = base_delta %}
-              {% else %}
-                {% set delta = 0 - base_delta %}
-              {% endif %}
+              outside_dead_zone
             {% endif %}
-            {{ delta | round(2) }}
+          anti_windup_state: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
+            {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
+            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
+            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+            {% if gate_blocked %}
+              gated_freeze
+            {% elif (error | abs) <= deadband %}
+              deadband_decay
+            {% else %}
+              active_integrating
+            {% endif %}
+          error_outside_deadband_ppm: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% set error = filtered - target %}
+            {{ (0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1)) | round(1) }}
+          slope_factor: >
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {{ ([([slope / 2.5, 1] | min), -1] | max) | round(3) }}
+          forecast_assist_pct: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
+            {% set error = filtered - target %}
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set forecast_delta = forecast_error - error %}
+            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+            {{ ([[assist, -0.20 * range_span] | max, 0.20 * range_span] | min) | round(2) }}
+          equilibrium_opening: >
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
+            {{ (min_pos + (range_span * fraction)) | round(2) }}
+          kp_auto_pct_per_ppm: >
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% set kp = (0.80 * range_span) / ([vent_gain * tau, 5] | max) %}
+            {{ ([[kp, 0.005] | max, 0.25] | min) | round(4) }}
+          ki_auto_pct_per_ppm_min: >
+            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% set ti = [[tau * 1.20, 12] | max, 90] | min %}
+            {{ (kp / ti) | round(5) }}
+          tau_estimate_min: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {% set previous_tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
+            {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
+              {% set sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
+              {% set sample = [[sample, 6] | max, 90] | min %}
+              {{ ((previous_tau * 0.85) + (sample * 0.15)) | round(2) }}
+            {% else %}
+              {{ previous_tau | round(2) }}
+            {% endif %}
+          vent_gain_estimate_ppm_min_per_fraction: >
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
+            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {% set closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set previous_vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% if applied_fraction >= 0.20 %}
+              {% set sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
+              {% set sample = [sample, 0.05] | max %}
+              {{ ((previous_vent_gain * 0.85) + (sample * 0.15)) | round(3) }}
+            {% else %}
+              {{ previous_vent_gain | round(3) }}
+            {% endif %}
+          closed_load_estimate_ppm_min: >
+            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
+            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
+            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
+            {% set previous_closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
+              {{ ((previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15)) | round(3) }}
+            {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
+              {{ ((previous_closed_load * 0.97) + 0.003) | round(3) }}
+            {% else %}
+              {{ previous_closed_load | round(3) }}
+            {% endif %}
+          raw_controller_output: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
+            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set equilibrium = state_attr('sensor.ventilation_eva_recommended_position', 'equilibrium_opening') | float(min_pos) %}
+            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set assist = ((forecast_error - error) / ([vent_gain * 10, 1] | max)) * range_span %}
+            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+            {% set integral_term = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
+            {% set raw_output = equilibrium + (kp * error_outside) + assist + integral_term %}
+            {{ raw_output | round(2) }}
+
+          integral_term: >
+            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+            {% set error = filtered - target %}
+            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
+            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
+            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
+            {% set range_span = [max_pos - min_pos, 0] | max %}
+            {% set previous_integral = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
+            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
+            {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
+            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
+            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
+            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
+            {% set equilibrium = state_attr('sensor.ventilation_eva_recommended_position', 'equilibrium_opening') | float(min_pos) %}
+            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
+            {% set ki = state_attr('sensor.ventilation_eva_recommended_position', 'ki_auto_pct_per_ppm_min') | float(0.002) %}
+            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(error) %}
+            {% set forecast_delta = forecast_error - error %}
+            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
+            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
+            {% set unclamped = equilibrium + (kp * error_outside) + assist %}
+            {% if gate_blocked %}
+              {% set new_integral = previous_integral * 0.995 %}
+            {% elif (unclamped <= min_pos and error_outside < 0) or (unclamped >= max_pos and error_outside > 0) %}
+              {% set new_integral = previous_integral * 0.98 %}
+            {% elif (error | abs) <= deadband %}
+              {% set new_integral = previous_integral * 0.98 %}
+            {% else %}
+              {% set new_integral = previous_integral + (ki * error_outside) %}
+            {% endif %}
+            {% set integral_limit = range_span * 0.80 %}
+            {{ ([[new_integral, 0 - integral_limit] | max, integral_limit] | min) | round(3) }}
 
       - name: "Ventilation Eva CO2 Error"
         unique_id: ventilation_eva_co2_error
@@ -573,14 +983,17 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_eva_forecast_error_30m') }}
+          {{ has_value('sensor.ventilation_eva_co2_filtered') }}
         state: >
-          {{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) | round(0) }}
+          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
+          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
+          {{ (filtered - target) | round(0) }}
         attributes:
           raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
           filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
           forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
-          error_source: "forecast_error_30m"
+          forecast_error_10m: "{{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) }}"
+          error_source: "filtered_co2_error"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS
@@ -705,7 +1118,7 @@ automation:
           - condition: template
             value_template: >
               {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+              {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
               {{ outdoor < min_temp }}
           # Перегрузка привода
           - condition: state
@@ -823,7 +1236,7 @@ automation:
       - condition: template
         value_template: >
           {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
           {{ outdoor >= min_temp }}
 
     action:
@@ -855,7 +1268,7 @@ automation:
       - platform: template
         value_template: >
           {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+          {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
           {{ outdoor < min_temp }}
         id: "cold"
 
@@ -885,7 +1298,7 @@ automation:
           - condition: template
             value_template: >
               {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+              {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
               {{ outdoor < min_temp }}
           - condition: state
             entity_id: binary_sensor.drivent_eva_datchik_peregruzki
@@ -922,7 +1335,7 @@ automation:
             Причина: {{ reason }}.
             {% if reason == 'cold_outdoor' %}
               Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
-              (мин: {{ states('input_number.ventilation_min_outdoor_temp') }}°C).
+              (мин: {{ states('input_number.ventilation_eva_min_outdoor_temp') }}°C).
             {% elif reason == 'overload' %}
               Привод Eva обнаружил перегрузку. Проверьте окно.
             {% elif reason == 'co2_sensor_lost' %}
