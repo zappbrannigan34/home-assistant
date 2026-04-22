@@ -11,8 +11,9 @@
 1. [Template Sensors Entity Tracking Issue](#1-template-sensors-entity-tracking-issue)
 2. [Unauthorized Configuration Changes](#2-unauthorized-configuration-changes)
 3. [Reload vs Restart Requirements](#3-reload-vs-restart-requirements)
-4. [Research Methodology Failures](#4-research-methodology-failures)
-5. [Cross-Reference Validation](#5-cross-reference-validation)
+4. [History Analysis Must Use HA API When Requested](#4-history-analysis-must-use-ha-api-when-requested)
+5. [Research Methodology Failures](#5-research-methodology-failures)
+6. [Cross-Reference Validation](#6-cross-reference-validation)
 
 ---
 
@@ -262,7 +263,69 @@ After converting templates to trigger-based format, `homeassistant.reload_all` d
 
 ---
 
-## 4. Research Methodology Failures
+## 4. History Analysis Must Use HA API When Requested
+
+### 📅 Date
+2026-04-22
+
+### 🐛 Problem
+При разборе скриншота вентиляционного графика история сначала анализировалась неверно: временное окно было угадано по оси X, а затем вместо Home Assistant API был использован обходной путь через recorder/SQLite.
+
+### 🔍 What Happened
+
+**Что было сделано правильно:**
+1. Линии на графике были идентифицированы по `dashboards/ventilation_dashboard.yaml`.
+
+**Что было сделано неправильно:**
+1. Время графика было выбрано по догадке из скриншота.
+2. После этого был выбран не тот источник данных — direct DB path вместо API.
+3. Это нарушило явное требование пользователя делать анализ через HA API.
+
+### 🚨 Root Causes
+
+1. **Guessing the time window**
+   - Скриншот был воспринят как достаточный источник для выбора диапазона времени.
+   - Это создало ложную стартовую точку для всего анализа.
+
+2. **Substituting the requested workflow**
+   - Требуемый путь (`HA API`) был заменён на более удобный для агента (`SQLite/recorder DB`).
+   - Это неверно даже если DB technically доступна.
+
+3. **History before source-of-truth anchoring**
+   - Анализ истории начался до того, как были жёстко зафиксированы реальные timestamp'ы и entity series.
+
+### ✅ Correct Procedure
+
+Если нужно анализировать историю Home Assistant entity по графику/скриншоту:
+
+1. Сначала определить, **какие entity нарисованы**, по YAML дашборда.
+2. Затем читать историю **через HA API**:
+   - `GET /api/history/period/<start>?end_time=<end>&filter_entity_id=...`
+3. Только после этого делать выводы о поведении контроллера/актуатора.
+4. Не подменять API прямым чтением recorder DB, если пользователь явно требует API-анализ.
+
+### 🎓 Lessons Learned
+
+1. **Скриншот не является источником времени**
+   - По одному изображению нельзя надёжно выбирать временной диапазон.
+   - Временное окно должно приходить из API/истории, а не из догадки агента.
+
+2. **API requirement is binding**
+   - Если пользователь сказал «через API», это обязательный путь.
+   - Нельзя заменять его своим более удобным методом.
+
+3. **Dashboard meaning first, history second**
+   - Сначала установить, что означает каждая линия.
+   - Потом — получить историю именно этих сущностей через API.
+
+### 📚 References
+- `dashboards/ventilation_dashboard.yaml`
+- `docs/DEBUGGING_HA.md`
+- Home Assistant REST API `/api/history/period/...`
+
+---
+
+## 5. Research Methodology Failures
 
 ### 📅 Date
 2025-11-24
@@ -371,7 +434,7 @@ Initial research was shallow, stopped at first hypothesis without thorough inves
 
 ---
 
-## 5. Cross-Reference Validation
+## 6. Cross-Reference Validation
 
 ### 📅 Date
 2025-11-25

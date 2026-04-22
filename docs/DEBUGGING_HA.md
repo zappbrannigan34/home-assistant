@@ -181,6 +181,41 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 # Compare timestamps - should be different if updating
 ```
 
+### Workflow: Analyze Dashboard Screenshot History Correctly
+
+Если пользователь прислал скриншот графика и нужно понять, что происходило на графике:
+
+1. **Сначала определить entity по YAML дашборда**
+   - Не гадать по цветам на память.
+   - Открыть соответствующий `dashboards/*.yaml` и сопоставить линии с entity.
+
+2. **Не угадывать временное окно по скриншоту**
+   - Ось X на картинке не является надёжным источником времени сама по себе.
+   - Сначала зафиксировать предполагаемый интервал, потом подтвердить его через API-историю.
+
+3. **Читать историю через HA API, а не через recorder DB, если просят API**
+
+```bash
+# Пример: история zap-графика вентиляции
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$URL/api/history/period/2026-04-21T22:20:00Z?end_time=2026-04-22T00:35:00Z&filter_entity_id=sensor.sensor_zap_co2,sensor.ventilation_co2_error,cover.ventilation_zap_group,sensor.ventilation_recommended_position" | jq
+```
+
+4. **Разбирать actuator отдельно от controller**
+   - На вентиляционном графике `cover.*.current_position` — это physical actuator layer.
+   - `sensor.ventilation*_recommended_position` нужно читать отдельно, если надо понять controller behavior.
+
+5. **Только после этого делать вывод**
+   - Что из линий — CO2
+   - Что — error
+   - Что — actual window position
+   - Что происходило с recommendation в тот же интервал
+
+**Нельзя делать так:**
+- сначала угадывать дату/время по скриншоту;
+- потом подменять API-анализ чтением `home-assistant_v2.db`;
+- потом делать вывод о контроллере, не отделив его от actuator line.
+
 ---
 
 ## 🛠️ Common Debugging Workflows
