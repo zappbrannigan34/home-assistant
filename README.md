@@ -10,7 +10,7 @@
 | Пакет | Описание | Документация |
 |-------|----------|--------------|
 | `humidity` | Управление увлажнителем Polaris PUH‑9105 (адаптивная цель по влажности, режимы AUTO/MANUAL). | [`packages/humidity/README.md`](packages/humidity/README.md) |
-| `ventilation` | Trend-based CO2 вентиляция через Drivent V2 (зонный алгоритм, защита ресурса привода). | [`packages/ventilation/README.md`](packages/ventilation/README.md) |
+| `ventilation` | Continuous forecast-error CO2 вентиляция через Drivent V2 с отдельным 30-минутным actuator layer. | [`packages/ventilation/README.md`](packages/ventilation/README.md) |
 
 > Новые пакеты добавляются в каталог `packages/` и в эту таблицу.
 
