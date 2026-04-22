@@ -38,7 +38,7 @@ input_number:
 
   ventilation_max_position:
     name: "Ventilation Max Position"
-    min: 5
+    min: 2
     max: 100
     step: 5
     unit_of_measurement: "%"
@@ -85,7 +85,7 @@ input_number:
 
   ventilation_eva_max_position:
     name: "Ventilation Eva Max Position"
-    min: 20
+    min: 2
     max: 100
     step: 5
     unit_of_measurement: "%"
