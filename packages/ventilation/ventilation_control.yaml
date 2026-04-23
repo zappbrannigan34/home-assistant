@@ -1118,7 +1118,7 @@ automation:
           - condition: template
             value_template: >
               {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-              {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
+              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
               {{ outdoor < min_temp }}
           # Перегрузка привода
           - condition: state
