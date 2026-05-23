@@ -885,8 +885,9 @@ automation:
                 "level_hours": level_hours | from_json,
                 "timestamp": now().isoformat()} | to_json }}
 
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "📊 Калибровка расхода увлажнителя"
           message: >
             Бак опустошён ({{ capacity | round(0) }} мл).
@@ -949,8 +950,9 @@ automation:
               Код ошибки: {{ error_code }}
             {% endif %}
 
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "{{ error_title }}"
           message: >
             {{ error_message }}

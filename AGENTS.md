@@ -13,6 +13,14 @@ YAML-пакеты автоматизаций для Home Assistant. Каждый
 
 Credentials хранятся в **`.secrets.env`** (gitignored, никогда не коммитить).
 
+### Telegram Bot API / уведомления
+
+- В РФ `api.telegram.org` может быть фактически недоступен напрямую; для HA Telegram Bot API использовать proxy из Hermes env, не печатая credentials.
+- Telegram config entry (`domain: telegram_bot`) хранит proxy в `.storage/core.config_entries` → `data.proxy_url`.
+- Legacy `notify.zapgroup` больше не использовать в operational YAML: обычные уведомления идут через `telegram_bot.send_message` на `notify.telegram_bot_8110302509_1002699581686`.
+- Emergency/leak уведомления идут через `telegram_bot.send_message` на `notify.telegram_bot_8110302509_1002715853345`.
+- Frigate snapshots отправлять через `telegram_bot.send_photo` с `url: http://ccab4aaf-frigate:5000/api/events/{{ event_id }}/snapshot.jpg` и проверять реальную доставку в Telegram history, не только HA HTTP 200.
+
 ```bash
 # Загрузить переменные
 source .secrets.env
@@ -243,7 +251,7 @@ PD-регулятор с предиктивным демпфированием �
 - PD-контроллер с прогнозом ошибки на 7 мин
 - Виртуальный датчик уровня воды с автокалибровкой per-level
 - Автоматическое управление питанием, режимом, интенсивностью
-- Уведомления об ошибках (notify.zapgroup)
+- Уведомления об ошибках через `telegram_bot.send_message` → `notify.telegram_bot_8110302509_1002699581686`
 
 ### Key Entities
 
@@ -293,7 +301,7 @@ Continuous forecast-error CO2 ventilation control for two rooms (`zap`, `eva`). 
 - grouped cover `cover.ventilation_zap_group` поверх `drivent_zap_left` + `drivent_zap_back`
 - Аварийное закрытие (холод, перегрузка, потеря CO2 сенсора)
 - Блокировку повторного открытия при холоде ниже минимального порога
-- Уведомления (notify.zapgroup)
+- Уведомления через `telegram_bot.send_message` → `notify.telegram_bot_8110302509_1002699581686`
 
 ### Key Entities
 

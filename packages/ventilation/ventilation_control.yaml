@@ -1155,8 +1155,9 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "🪟 Окно закрыто (безопасность)"
           message: >
             Причина: {{ reason }}.
@@ -1187,8 +1188,9 @@ automation:
         to: "on"
 
     action:
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "⚠️ Перегрузка привода Drivent (zap_left)"
           message: >
             Привод обнаружил перегрузку. Проверьте:
@@ -1328,8 +1330,9 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "🪟 Окно Eva закрыто (безопасность)"
           message: >
             Причина: {{ reason }}.
@@ -1356,8 +1359,9 @@ automation:
         to: "on"
 
     action:
-      - service: notify.zapgroup
+      - action: telegram_bot.send_message
         data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
           title: "⚠️ Перегрузка привода Drivent (eva)"
           message: >
             Привод Eva обнаружил перегрузку. Проверьте:
