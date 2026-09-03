@@ -581,6 +581,7 @@ template:
           {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(previous_load) %}
           {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(previous_gain) %}
           {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(previous_tau) %}
+          {% set model_changed = (load - previous_load) | abs > 0.0005 or (gain - previous_gain) | abs > 0.0005 or (tau - previous_tau) | abs > 0.0005 %}
           {% set equilibrium_fraction = [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
           {% set equilibrium = min_pos + span * equilibrium_fraction %}
           {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
@@ -602,7 +603,7 @@ template:
           {% set previous_max = state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) %}
           {% set settings_changed = previous_target != target or previous_min != min_pos or previous_max != max_pos %}
           {% set without_integral = equilibrium + kp * error_outside + assist %}
-          {% if generation != 3 or settings_changed or trigger.id == 'startup' %}
+          {% if generation != 3 or settings_changed or model_changed or trigger.id == 'startup' %}
             {% set integral = previous_demand - without_integral %}
           {% elif (without_integral + previous_integral >= upper and error_outside > 0) or (without_integral + previous_integral <= min_pos and error_outside < 0) %}
             {% set integral = previous_integral %}
@@ -737,6 +738,10 @@ template:
             {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
             {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
             {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
+            {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(load) %}
+            {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(gain) %}
+            {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(tau) %}
+            {% set model_changed = (load - previous_load) | abs > 0.0005 or (gain - previous_gain) | abs > 0.0005 or (tau - previous_tau) | abs > 0.0005 %}
             {% set equilibrium = min_pos + span * [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
             {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
             {% set kp = [[kp, 0.002] | max, 0.10] | min %}
@@ -753,7 +758,7 @@ template:
             {% set generation = state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) %}
             {% set settings_changed = state_attr('sensor.ventilation_recommended_position', 'previous_target') | float(target) != target or state_attr('sensor.ventilation_recommended_position', 'previous_min_position') | float(min_pos) != min_pos or state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) != max_pos %}
             {% set without_integral = equilibrium + kp * error_outside + assist %}
-            {% if generation != 3 or settings_changed or trigger.id == 'startup' %}
+            {% if generation != 3 or settings_changed or model_changed or trigger.id == 'startup' %}
               {% set updated = previous_demand - without_integral %}
             {% elif (without_integral + previous >= upper and error_outside > 0) or (without_integral + previous <= min_pos and error_outside < 0) %}
               {% set updated = previous %}
