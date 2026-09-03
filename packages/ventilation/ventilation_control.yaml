@@ -323,7 +323,7 @@ template:
             {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(3) }}
           ventilation_gain_estimate_ppm_min_per_fraction: >
             {% set previous = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
             {% set count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
             {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
@@ -360,6 +360,50 @@ template:
             {% set accepted = eligible and (count < 3 or (sample <= previous * 4 and sample >= previous / 4)) %}
             {% set weight = [count, 9] | min %}
             {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(2) }}
+          accepted_closed_load_estimate_ppm_min: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
+            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
+            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
+            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
+            {% set total = l + g + t %}
+            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
+            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
+            {{ state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(previous) if promote else previous }}
+          accepted_ventilation_gain_estimate_ppm_min_per_fraction: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
+            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
+            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
+            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
+            {% set total = l + g + t %}
+            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
+            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
+            {{ state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(previous) if promote else previous }}
+          accepted_tau_estimate_min: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
+            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
+            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
+            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
+            {% set total = l + g + t %}
+            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
+            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
+            {{ state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(previous) if promote else previous }}
+          accepted_model_generation: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) %}
+            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
+            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
+            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
+            {% set total = l + g + t %}
+            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
+            {{ previous + 1 if trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total else previous }}
+          accepted_total_sample_count: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
+            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
+            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
+            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
+            {% set total = l + g + t %}
+            {{ total if trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > previous else previous }}
+          coefficient_source: >
+            {{ 'last_known_good' if state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) > 0 else 'history_bootstrap' }}
           load_sample_count: >
             {% set count = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
             {% set previous = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
@@ -384,7 +428,7 @@ template:
           gain_sample_count: >
             {% set count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
             {% set previous = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
+            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
             {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set span = [max_pos - min_pos, 1] | max %}
@@ -451,34 +495,17 @@ template:
         unique_id: ventilation_zap_thermal_cap
         unit_of_measurement: "%"
         icon: mdi:home-thermometer-outline
-        availability: >
-          {{ has_value('sensor.sensor_zap_temperature') and
-             states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and
-             state_attr('climate.radiator_left_zap', 'temperature') is not none }}
         state: >
-          {% set room = states('sensor.sensor_zap_temperature') | float(20) %}
-          {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') | float(room) %}
           {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-          {% set span = [max_pos - min_pos, 0] | max %}
-          {% set now_ts = as_timestamp(now()) %}
-          {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
-          {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
-          {% set previous_room = state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
-          {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-          {% set sample = (room - previous_room) / dt %}
-          {% set alpha = [dt / 5, 1] | min %}
-          {% set slope = previous_slope + alpha * (sample - previous_slope) %}
-          {% set predicted = room + slope * 10 %}
-          {% set deficit = setpoint - predicted %}
-          {% set normalized_deficit = [[[deficit / 5, 0] | max, 1] | min, 0] | max %}
-          {% set closure_ratio = normalized_deficit * normalized_deficit %}
-          {{ (max_pos - span * closure_ratio) | round(1) }}
-        attributes:
-          room_temperature: "{{ states('sensor.sensor_zap_temperature') | float(0) }}"
-          heating_setpoint: "{{ state_attr('climate.radiator_left_zap', 'temperature') | float(0) }}"
-          room_temperature_slope_c_per_min: >
-            {% set room = states('sensor.sensor_zap_temperature') | float(20) %}
+          {% set room_valid = has_value('sensor.sensor_zap_temperature') %}
+          {% set setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+          {% if not room_valid or not setpoint_valid %}
+            {{ max_pos | round(1) }}
+          {% else %}
+            {% set room = states('sensor.sensor_zap_temperature') | float %}
+            {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') | float %}
+            {% set span = [max_pos - min_pos, 0] | max %}
             {% set now_ts = as_timestamp(now()) %}
             {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
             {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
@@ -486,26 +513,70 @@ template:
             {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
             {% set sample = (room - previous_room) / dt %}
             {% set alpha = [dt / 5, 1] | min %}
-            {{ (previous_slope + alpha * (sample - previous_slope)) | round(4) }}
+            {% set slope = previous_slope + alpha * (sample - previous_slope) %}
+            {% set predicted = room + slope * 10 %}
+            {% set deficit = setpoint - predicted %}
+            {% set normalized_deficit = [[[deficit / 5, 0] | max, 1] | min, 0] | max %}
+            {% set closure_ratio = normalized_deficit * normalized_deficit %}
+            {{ (max_pos - span * closure_ratio) | round(1) }}
+          {% endif %}
+        attributes:
+          room_temperature: >
+            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else none }}
+          heating_setpoint: >
+            {% set valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+            {{ state_attr('climate.radiator_left_zap', 'temperature') | float if valid else none }}
+          room_temperature_slope_c_per_min: >
+            {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
+            {% if not has_value('sensor.sensor_zap_temperature') %}
+              {{ previous_slope | round(4) }}
+            {% else %}
+              {% set room = states('sensor.sensor_zap_temperature') | float %}
+              {% set now_ts = as_timestamp(now()) %}
+              {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
+              {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
+              {% set previous_room = state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
+              {% set sample = (room - previous_room) / dt %}
+              {% set alpha = [dt / 5, 1] | min %}
+              {{ (previous_slope + alpha * (sample - previous_slope)) | round(4) }}
+            {% endif %}
           predicted_room_temperature_10m: >
-            {% set room = states('sensor.sensor_zap_temperature') | float(20) %}
-            {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {{ (room + slope * 10) | round(2) }}
+            {% if not has_value('sensor.sensor_zap_temperature') %}
+              {{ none }}
+            {% else %}
+              {% set room = states('sensor.sensor_zap_temperature') | float %}
+              {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
+              {{ (room + slope * 10) | round(2) }}
+            {% endif %}
           temperature_deficit_c: >
-            {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') | float(20) %}
-            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') | float(states('sensor.sensor_zap_temperature') | float(20)) %}
-            {{ ([setpoint - predicted, 0] | max) | round(2) }}
+            {% set setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
+            {% if not setpoint_valid or predicted is none %}
+              {{ none }}
+            {% else %}
+              {{ ((state_attr('climate.radiator_left_zap', 'temperature') | float) - (predicted | float)) | round(2) }}
+            {% endif %}
           thermal_limit_active: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {{ states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
+            {% set inputs_valid = has_value('sensor.sensor_zap_temperature') and states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+            {{ inputs_valid and states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
           thermal_limit_reason: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {{ 'predicted_below_heating_setpoint' if states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 else 'inactive' }}
+            {% if not has_value('sensor.sensor_zap_temperature') %}
+              inactive_room_temperature_unavailable
+            {% elif states('climate.radiator_left_zap') in ['unknown', 'unavailable'] or state_attr('climate.radiator_left_zap', 'temperature') is none %}
+              inactive_heating_setpoint_unavailable
+            {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 %}
+              predicted_below_heating_setpoint
+            {% else %}
+              inactive
+            {% endif %}
           soft_span_c: 5
           minimum_ventilation_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
           outdoor_temperature: "{{ state_attr('weather.forecast_home_assistant', 'temperature') | float(0) }}"
           heating_setpoint_source: climate.radiator_left_zap
-          previous_room_temperature: "{{ states('sensor.sensor_zap_temperature') | float(0) }}"
+          previous_room_temperature: >
+            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(0) }}
           last_update_ts: "{{ as_timestamp(now()) }}"
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -575,12 +646,12 @@ template:
           {% set span = [max_pos - min_pos, 0] | max %}
           {% set error = filtered - target %}
           {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-          {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
-          {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-          {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(25) %}
-          {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(previous_load) %}
-          {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(previous_gain) %}
-          {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(previous_tau) %}
+          {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(2.597) %}
+          {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
+          {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(30.715) %}
+          {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(previous_load) %}
+          {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(previous_gain) %}
+          {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(previous_tau) %}
           {% set model_changed = (load - previous_load) | abs > 0.0005 or (gain - previous_gain) | abs > 0.0005 or (tau - previous_tau) | abs > 0.0005 %}
           {% set equilibrium_fraction = [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
           {% set equilibrium = min_pos + span * equilibrium_fraction %}
@@ -696,22 +767,24 @@ template:
             {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set span = [max_pos - min_pos, 0] | max %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8)) %}
+            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(6.681)) %}
             {% set assist = ((forecast - filtered) / ([gain * 10, 1] | max)) * span %}
             {{ ([[assist, -0.05 * span] | max, 0.05 * span] | min) | round(2) }}
-          closed_load_estimate_ppm_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) }}"
-          vent_gain_estimate_ppm_min_per_fraction: "{{ state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) }}"
-          tau_estimate_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) }}"
+          closed_load_estimate_ppm_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) }}"
+          vent_gain_estimate_ppm_min_per_fraction: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) }}"
+          tau_estimate_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) }}"
+          coefficient_source: "{{ state_attr('sensor.ventilation_zap_room_model', 'coefficient_source') | default('history_bootstrap', true) }}"
+          accepted_model_generation: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) }}"
           kp_auto_pct_per_ppm: >
             {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set span = [max_pos - min_pos, 0] | max %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
+            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
+            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
             {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
             {{ ([[kp, 0.002] | max, 0.10] | min) | round(4) }}
           ti_auto_min: >
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
+            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
             {{ ([[tau * 2, 30] | max, 180] | min) | round(2) }}
           ki_auto_pct_per_ppm_min: >
             {% set kp = state_attr('sensor.ventilation_recommended_position', 'kp_auto_pct_per_ppm') | float(0.02) %}
@@ -721,8 +794,8 @@ template:
             {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set span = [max_pos - min_pos, 0] | max %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
+            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
             {% set fraction = [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
             {{ (min_pos + span * fraction) | round(2) }}
           integral_term: >
@@ -735,9 +808,9 @@ template:
             {% set span = [max_pos - min_pos, 0] | max %}
             {% set error = filtered - target %}
             {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
+            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
+            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
+            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
             {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(load) %}
             {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(gain) %}
             {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(tau) %}
@@ -782,9 +855,9 @@ template:
             {% set span = [max_pos - min_pos, 0] | max %}
             {% set error = filtered - target %}
             {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
+            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
+            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
+            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
             {% set equilibrium = min_pos + span * [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
             {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
             {% set kp = [[kp, 0.002] | max, 0.10] | min %}

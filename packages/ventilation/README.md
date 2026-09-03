@@ -40,6 +40,10 @@ sample принимается, если:
 
 оценки используют `room_load = co2_slope + ventilation_gain × opening_fraction` и `ventilation_gain = (room_load − co2_slope) / opening_fraction`, поэтому load sample не зависит от обязательного полного закрытия окна.
 
+модель хранит provisional estimates, отдельные sample counts и confidence. Active controller читает только accepted last-known-good coefficients.
+
+до набора `load/gain/tau` counts `4/6/4` используется history-derived ZAP bootstrap из сохранённого режима C: `room_load=2.597 ppm/min`, `ventilation_gain=6.681 ppm/min/fraction`, `tau=30.715 min`. После достижения порога новый набор повышает `accepted_model_generation`; его применение выполняется bumpless.
+
 модель хранит:
 
 - `closed_load_estimate_ppm_min`;
@@ -90,7 +94,7 @@ thermal supervisor каждую минуту:
 
 `final_recommendation = min(co2_demand, temperature_cap)`
 
-`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. При недоступной room temperature или setpoint thermal cap отключается; существующие outdoor temperature, overload и CO₂-unavailable safety automations продолжают действовать.
+`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. `temperature_deficit_c` остаётся signed diagnostic. При недоступной room temperature или setpoint sensor сохраняет numeric cap=`max_position` с явной inactive-причиной; существующие outdoor temperature, overload и CO₂-unavailable safety automations продолжают действовать.
 
 ## actuator layer
 

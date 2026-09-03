@@ -244,15 +244,31 @@ views:
           - type: attribute
             entity: sensor.ventilation_zap_room_model
             attribute: closed_load_estimate_ppm_min
-            name: Estimated Room Load
+            name: Provisional Room Load
           - type: attribute
             entity: sensor.ventilation_zap_room_model
             attribute: ventilation_gain_estimate_ppm_min_per_fraction
-            name: Estimated Ventilation Gain
+            name: Provisional Ventilation Gain
           - type: attribute
             entity: sensor.ventilation_zap_room_model
             attribute: tau_estimate_min
-            name: Estimated Tau
+            name: Provisional Tau
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: coefficient_source
+            name: Active Coefficient Source
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: closed_load_estimate_ppm_min
+            name: Active Room Load
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: vent_gain_estimate_ppm_min_per_fraction
+            name: Active Ventilation Gain
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: tau_estimate_min
+            name: Active Tau
           - entity: sensor.ventilation_zap_thermal_cap
             name: Thermal Opening Cap
           - type: attribute
