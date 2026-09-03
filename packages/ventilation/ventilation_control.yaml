@@ -315,8 +315,10 @@ template:
             {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
             {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
             {% set eligible = trigger.id == 'cycle_end' and stable and settings_same and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set sample = [[slope, 0] | max, 20] | min %}
-            {% set accepted = eligible and fraction <= 0.10 and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
+            {% set previous_gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set raw_sample = slope + previous_gain * fraction %}
+            {% set sample = [[raw_sample, 0] | max, 20] | min %}
+            {% set accepted = eligible and raw_sample >= 0 and raw_sample <= 20 and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
             {% set weight = [count, 9] | min %}
             {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(3) }}
           ventilation_gain_estimate_ppm_min_per_fraction: >
@@ -367,15 +369,17 @@ template:
             {% set applied = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
             {% set fraction = [[(applied - min_pos) / span, 0] | max, 1] | min %}
             {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set sample = [[slope, 0] | max, 20] | min %}
+            {% set previous_gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
+            {% set raw_sample = slope + previous_gain * fraction %}
+            {% set sample = [[raw_sample, 0] | max, 20] | min %}
             {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
             {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(states('input_number.ventilation_target_co2') | float(650)) %}
             {% set target = states('input_number.ventilation_target_co2') | float(650) %}
             {% set previous_min = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') | float(min_pos) %}
             {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
             {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
-            {% set eligible = trigger.id == 'cycle_end' and (as_timestamp(now()) - last_ts) >= 900 and settings_same and fraction <= 0.10 and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set accepted = eligible and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
+            {% set eligible = trigger.id == 'cycle_end' and (as_timestamp(now()) - last_ts) >= 900 and settings_same and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
+            {% set accepted = eligible and raw_sample >= 0 and raw_sample <= 20 and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
             {{ ([count + (1 if accepted else 0), 10000] | min) | int }}
           gain_sample_count: >
             {% set count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
@@ -413,11 +417,21 @@ template:
             {% set accepted = eligible and (count < 3 or (sample <= previous * 4 and sample >= previous / 4)) %}
             {{ ([count + (1 if accepted else 0), 10000] | min) | int }}
           model_confidence_pct: "{{ states('sensor.ventilation_zap_room_model') | float(0) }}"
-          sample_applied_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) }}"
-          sample_slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
-          last_target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          last_min_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
-          last_max_position: "{{ states('input_number.ventilation_max_position') | float(80) }}"
+          sample_applied_position: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'sample_applied_position') %}
+            {{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
+          sample_slope_ppm_min: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'sample_slope_ppm_min') %}
+            {{ states('sensor.ventilation_co2_slope') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
+          last_target: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_target') %}
+            {{ states('input_number.ventilation_target_co2') | float(650) if trigger.id == 'cycle_end' or previous is none else previous }}
+          last_min_position: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') %}
+            {{ states('input_number.ventilation_min_position') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
+          last_max_position: >
+            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') %}
+            {{ states('input_number.ventilation_max_position') | float(80) if trigger.id == 'cycle_end' or previous is none else previous }}
           last_model_update: >
             {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_model_update') | default('', true) %}
             {{ now().isoformat() if trigger.id == 'cycle_end' else previous }}
