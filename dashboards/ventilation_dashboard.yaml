@@ -327,18 +327,36 @@ views:
         view_layout:
           position: sidebar
         entities:
+          - entity: input_boolean.ventilation_use_indoor_temperature
+            name: Use Indoor Temperature Safety
+          - entity: sensor.ventilation_zap_safety_temperature
+            name: Selected Safety Temperature
+          - type: attribute
+            entity: sensor.ventilation_zap_safety_temperature
+            attribute: source
+            name: Selected Temperature Source
+          - type: attribute
+            entity: sensor.ventilation_zap_safety_temperature
+            attribute: fallback_active
+            name: Temperature Fallback Active
+          - entity: sensor.sensor_zap_temperature
+            name: Primary Room Temperature
+          - entity: sensor.radiator_left_zap_local_temperature
+            name: Radiator Valve Temperature
           - type: attribute
             entity: weather.forecast_home_assistant
             attribute: temperature
-            name: Outdoor Temp
+            name: Outdoor Temperature
+          - entity: input_number.ventilation_min_indoor_temp
+            name: Min Indoor Temperature
+          - entity: input_number.ventilation_min_outdoor_temp
+            name: Min Outdoor Temperature
           - entity: input_number.ventilation_target_co2
             name: Target CO2
           - entity: input_number.ventilation_min_position
             name: Min Position
           - entity: input_number.ventilation_max_position
             name: Max Position
-          - entity: input_number.ventilation_min_outdoor_temp
-            name: Min Outdoor Temp
 
   - title: Eva
     type: sidebar

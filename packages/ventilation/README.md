@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.1.0 новый cycle-identified PI controller и temperature protection применяются только к `zap`; EVA остаётся на существующем control law.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.2.0 selectable temperature safety и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
 
 ## архитектурные инварианты
 
@@ -109,11 +109,18 @@ fixed steps и дополнительные CO₂ conditions в actuator layer �
 
 ## safety ZAP
 
-обычное управление блокируется, а safety automation закрывает окна при:
+`input_boolean.ventilation_use_indoor_temperature` выбирает режим hard safety:
 
-- наружной температуре ниже `input_number.ventilation_min_outdoor_temp`;
-- overload любого ZAP actuator;
-- недоступности `sensor.sensor_zap_co2` более двух минут.
+- `on` — primary `sensor.sensor_zap_temperature`, затем fallback `sensor.radiator_left_zap_local_temperature`, затем наружная температура;
+- `off` — используется только наружная температура.
+
+для внутренних источников применяется `input_number.ventilation_min_indoor_temp`; для outdoor-only и outdoor fallback — `input_number.ventilation_min_outdoor_temp`.
+
+`sensor.ventilation_zap_safety_temperature` публикует выбранное значение, source, threshold и fallback state. Если ни один разрешённый источник недоступен, automation закрывает окна fail-safe.
+
+обычное управление блокируется, а safety automation закрывает окна при selected temperature ниже соответствующего порога, overload любого ZAP actuator или недоступности `sensor.sensor_zap_co2` более двух минут.
+
+в режиме `off` thermal cap отключён и защита температуры выполняется только по наружному hard threshold. В режиме `on` thermal cap использует ту же primary/fallback indoor chain; при смене source temperature slope сбрасывается без ложного скачка.
 
 ## EVA
 
@@ -133,6 +140,8 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 - `input_number.ventilation_min_position`;
 - `input_number.ventilation_max_position`;
 - `input_number.ventilation_deadband_ppm`;
+- `input_boolean.ventilation_use_indoor_temperature`;
+- `input_number.ventilation_min_indoor_temp`;
 - `input_number.ventilation_min_outdoor_temp`;
 - `input_datetime.ventilation_last_adjustment`.
 
@@ -144,8 +153,9 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 - room model confidence/load/gain/tau;
 - equilibrium, automatic gains, integral и bounded forecast assist;
 - room temperature, heating setpoint, predicted temperature и thermal cap;
+- selected safety temperature, source, fallback state и оба temperature thresholds;
 - overload/safety state.
 
 **Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
-**Version:** 2.1.0
+**Version:** 2.2.0

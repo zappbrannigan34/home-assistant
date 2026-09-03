@@ -1,7 +1,7 @@
 # package: ventilation_multiroom
-# Version: 2.1.0
+# Version: 2.2.0
 # Last Updated: 2026-09-03
-# Description: Cycle-identified ZAP CO2 controller with thermal protection; EVA unchanged
+# Description: ZAP selectable indoor/outdoor temperature safety; EVA unchanged
 #
 # АЛГОРИТМ: Отдельный room-local PI-style controller для каждой комнаты.
 # Controller layer считает demand непрерывно по filtered CO2 error,
@@ -52,6 +52,16 @@ input_number:
     step: 1
     unit_of_measurement: "°C"
     icon: mdi:thermometer-alert
+    mode: box
+
+  ventilation_min_indoor_temp:
+    name: "Ventilation Min Indoor Temp"
+    min: 10
+    max: 25
+    step: 0.5
+    initial: 16
+    unit_of_measurement: "°C"
+    icon: mdi:home-thermometer
     mode: box
 
   ventilation_deadband_ppm:
@@ -111,6 +121,12 @@ input_number:
     unit_of_measurement: "ppm"
     icon: mdi:arrow-left-right
     mode: box
+
+input_boolean:
+  ventilation_use_indoor_temperature:
+    name: "Ventilation Use Indoor Temperature"
+    icon: mdi:home-thermometer-outline
+    initial: true
 
 input_datetime:
   ventilation_last_adjustment:
@@ -481,7 +497,84 @@ template:
             {{ now().isoformat() if trigger.id == 'cycle_end' else previous }}
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 3: ZAP — плавное ограничение открытия по температуре
+  #  БЛОК 3: ZAP — выбранная температура для hard safety
+  # ════════════════════════════════════════════════════════════════════════════
+  - sensor:
+      - name: "Ventilation ZAP Safety Temperature"
+        unique_id: ventilation_zap_safety_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:shield-thermometer
+        state: >
+          {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+          {% set primary_valid = has_value('sensor.sensor_zap_temperature') %}
+          {% set valve_valid = has_value('sensor.radiator_left_zap_local_temperature') %}
+          {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
+          {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
+          {% if indoor_mode and primary_valid %}
+            {{ states('sensor.sensor_zap_temperature') | float }}
+          {% elif indoor_mode and valve_valid %}
+            {{ states('sensor.radiator_left_zap_local_temperature') | float }}
+          {% elif outdoor_valid %}
+            {{ outdoor_raw | float }}
+          {% else %}
+            {{ none }}
+          {% endif %}
+        attributes:
+          requested_mode: >
+            {{ 'indoor_preferred' if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') else 'outdoor_only' }}
+          source: >
+            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
+            {% if indoor_mode and has_value('sensor.sensor_zap_temperature') %}
+              primary_room
+            {% elif indoor_mode and has_value('sensor.radiator_left_zap_local_temperature') %}
+              radiator_valve
+            {% elif outdoor_raw is not none and is_number(outdoor_raw) %}
+              outdoor
+            {% else %}
+              unavailable
+            {% endif %}
+          selected_threshold: >
+            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+            {% set has_indoor = has_value('sensor.sensor_zap_temperature') or has_value('sensor.radiator_left_zap_local_temperature') %}
+            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
+            {% if indoor_mode and has_indoor %}
+              {{ states('input_number.ventilation_min_indoor_temp') | float(16) }}
+            {% elif outdoor_raw is not none and is_number(outdoor_raw) %}
+              {{ states('input_number.ventilation_min_outdoor_temp') | float(-10) }}
+            {% else %}
+              {{ none }}
+            {% endif %}
+          unsafe: >
+            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+            {% set primary_valid = has_value('sensor.sensor_zap_temperature') %}
+            {% set valve_valid = has_value('sensor.radiator_left_zap_local_temperature') %}
+            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
+            {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
+            {% if indoor_mode and primary_valid %}
+              {{ states('sensor.sensor_zap_temperature') | float < states('input_number.ventilation_min_indoor_temp') | float(16) }}
+            {% elif indoor_mode and valve_valid %}
+              {{ states('sensor.radiator_left_zap_local_temperature') | float < states('input_number.ventilation_min_indoor_temp') | float(16) }}
+            {% elif outdoor_valid %}
+              {{ outdoor_raw | float < states('input_number.ventilation_min_outdoor_temp') | float(-10) }}
+            {% else %}
+              true
+            {% endif %}
+          fallback_active: >
+            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+            {{ indoor_mode and not has_value('sensor.sensor_zap_temperature') }}
+          primary_room_temperature: >
+            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else none }}
+          radiator_valve_temperature: >
+            {{ states('sensor.radiator_left_zap_local_temperature') | float if has_value('sensor.radiator_left_zap_local_temperature') else none }}
+          outdoor_temperature: >
+            {% set value = state_attr('weather.forecast_home_assistant', 'temperature') %}
+            {{ value | float if value is not none and is_number(value) else none }}
+
+  # ════════════════════════════════════════════════════════════════════════════
+  #  БЛОК 4: ZAP — плавное ограничение открытия по температуре
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
@@ -498,19 +591,23 @@ template:
         state: >
           {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
           {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-          {% set room_valid = has_value('sensor.sensor_zap_temperature') %}
+          {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
+          {% set room_source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+          {% set room_valid = indoor_mode and room_source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
           {% set setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
           {% if not room_valid or not setpoint_valid %}
             {{ max_pos | round(1) }}
           {% else %}
-            {% set room = states('sensor.sensor_zap_temperature') | float %}
+            {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
             {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') | float %}
             {% set span = [max_pos - min_pos, 0] | max %}
             {% set now_ts = as_timestamp(now()) %}
             {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
             {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
-            {% set previous_room = state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
-            {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
+            {% set previous_source = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_source') | default('', true) %}
+            {% set source_changed = previous_source != room_source %}
+            {% set previous_room = room if source_changed else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
+            {% set previous_slope = 0 if source_changed else state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
             {% set sample = (room - previous_room) / dt %}
             {% set alpha = [dt / 5, 1] | min %}
             {% set slope = previous_slope + alpha * (sample - previous_slope) %}
@@ -522,16 +619,25 @@ template:
           {% endif %}
         attributes:
           room_temperature: >
-            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else none }}
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {{ states('sensor.ventilation_zap_safety_temperature') | float if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') else none }}
+          room_temperature_source: >
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {{ source if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] else 'inactive' }}
           heating_setpoint: >
             {% set valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
             {{ state_attr('climate.radiator_left_zap', 'temperature') | float if valid else none }}
           room_temperature_slope_c_per_min: >
             {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {% if not has_value('sensor.sensor_zap_temperature') %}
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
+            {% set previous_source = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_source') | default('', true) %}
+            {% if not room_valid %}
               {{ previous_slope | round(4) }}
+            {% elif previous_source != source %}
+              0
             {% else %}
-              {% set room = states('sensor.sensor_zap_temperature') | float %}
+              {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
               {% set now_ts = as_timestamp(now()) %}
               {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
               {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
@@ -541,10 +647,12 @@ template:
               {{ (previous_slope + alpha * (sample - previous_slope)) | round(4) }}
             {% endif %}
           predicted_room_temperature_10m: >
-            {% if not has_value('sensor.sensor_zap_temperature') %}
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
+            {% if not room_valid %}
               {{ none }}
             {% else %}
-              {% set room = states('sensor.sensor_zap_temperature') | float %}
+              {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
               {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
               {{ (room + slope * 10) | round(2) }}
             {% endif %}
@@ -558,12 +666,16 @@ template:
             {% endif %}
           thermal_limit_active: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set inputs_valid = has_value('sensor.sensor_zap_temperature') and states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% set inputs_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') and states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
             {{ inputs_valid and states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
           thermal_limit_reason: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% if not has_value('sensor.sensor_zap_temperature') %}
-              inactive_room_temperature_unavailable
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% if is_state('input_boolean.ventilation_use_indoor_temperature', 'off') %}
+              inactive_external_only_mode
+            {% elif source not in ['primary_room', 'radiator_valve'] %}
+              inactive_internal_temperature_unavailable
             {% elif states('climate.radiator_left_zap') in ['unknown', 'unavailable'] or state_attr('climate.radiator_left_zap', 'temperature') is none %}
               inactive_heating_setpoint_unavailable
             {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 %}
@@ -576,11 +688,13 @@ template:
           outdoor_temperature: "{{ state_attr('weather.forecast_home_assistant', 'temperature') | float(0) }}"
           heating_setpoint_source: climate.radiator_left_zap
           previous_room_temperature: >
-            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(0) }}
+            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
+            {{ states('sensor.ventilation_zap_safety_temperature') | float if room_valid else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(0) }}
           last_update_ts: "{{ as_timestamp(now()) }}"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 4: ZAP — 10m forecast + equilibrium-seeking PI-style controller
+  #  БЛОК 5: ZAP — 10m forecast + equilibrium-seeking PI-style controller
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
@@ -1311,12 +1425,12 @@ automation:
         value_template: >
           {{ has_value('sensor.sensor_zap_co2') }}
 
-      # На улице не холоднее минимального порога
+      # Выбранная temperature source не ниже соответствующего safety threshold
       - condition: template
         value_template: >
-          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-          {{ outdoor >= min_temp }}
+          {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
+          {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
+          {{ is_number(selected) and threshold is not none and selected | float >= threshold | float }}
 
     action:
       - variables:
@@ -1335,7 +1449,7 @@ automation:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
 
   # ══════════════════════════════════════════════════════════════════════════
-  #  АВАРИЙНОЕ ЗАКРЫТИЕ: температура, дождь, перегрузка, недоступность CO2
+  #  АВАРИЙНОЕ ЗАКРЫТИЕ: selected temperature, перегрузка, недоступность CO2
   # ══════════════════════════════════════════════════════════════════════════
   - id: "Аварийное закрытие окна"
     alias: ventilation_safety_close
@@ -1344,12 +1458,12 @@ automation:
     initial_state: true
 
     trigger:
-      # Температура на улице упала ниже минимума
+      # Выбранная temperature source стала ниже своего порога либо недоступна
       - platform: template
         value_template: >
-          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-          {{ outdoor < min_temp }}
+          {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
+          {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
+          {{ not is_number(selected) or threshold is none or selected | float < threshold | float }}
         id: "cold"
 
       # Перегрузка привода
@@ -1385,12 +1499,12 @@ automation:
       # Хотя бы одно условие для закрытия выполнено
       - condition: or
         conditions:
-          # Слишком холодно на улице
+          # Выбранная temperature source ниже порога либо полностью недоступна
           - condition: template
             value_template: >
-              {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-              {% set min_temp = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-              {{ outdoor < min_temp }}
+              {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
+              {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
+              {{ not is_number(selected) or threshold is none or selected | float < threshold | float }}
           # Перегрузка привода
           - condition: state
             entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
@@ -1413,7 +1527,16 @@ automation:
             {% elif is_state('sensor.sensor_zap_co2', 'unavailable') %}
               co2_sensor_lost
             {% else %}
-              cold_outdoor
+              {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+              {% if source == 'primary_room' %}
+                cold_indoor_primary
+              {% elif source == 'radiator_valve' %}
+                cold_indoor_radiator_valve
+              {% elif source == 'outdoor' %}
+                cold_outdoor
+              {% else %}
+                temperature_sources_unavailable
+              {% endif %}
             {% endif %}
 
       - service: cover.close_cover
@@ -1432,9 +1555,12 @@ automation:
           title: "🪟 Окно закрыто (безопасность)"
           message: >
             Причина: {{ reason }}.
-            {% if reason == 'cold_outdoor' %}
-              Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
-              (мин: {{ states('input_number.ventilation_min_outdoor_temp') }}°C).
+            {% if reason in ['cold_indoor_primary', 'cold_indoor_radiator_valve', 'cold_outdoor'] %}
+              Выбранная температура: {{ states('sensor.ventilation_zap_safety_temperature') }}°C.
+              Источник: {{ state_attr('sensor.ventilation_zap_safety_temperature', 'source') }}.
+              Минимум: {{ state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') }}°C.
+            {% elif reason == 'temperature_sources_unavailable' %}
+              Все разрешённые источники температуры недоступны. Выполнено fail-safe закрытие.
             {% elif reason in ['overload_left', 'overload_back'] %}
               Привод обнаружил перегрузку ({{ reason }}). Проверьте окна.
             {% elif reason == 'co2_sensor_lost' %}

@@ -73,7 +73,7 @@ home-assistant/
     │   ├── humidity_control.yaml    # Основной YAML-пакет (v3.1.0)
     │   └── README.md               # Документация пакета
     └── ventilation/
-        ├── ventilation_control.yaml # ZAP generation 3 + EVA controller (v2.1.0)
+        ├── ventilation_control.yaml # ZAP generation 3 + selectable safety (v2.2.0)
         └── README.md               # Документация пакета
 ```
 
@@ -281,11 +281,11 @@ PD-регулятор с предиктивным демпфированием �
 
 ---
 
-## Existing Package: `ventilation` (v2.1.0)
+## Existing Package: `ventilation` (v2.2.0)
 
 **Devices:** Drivent V2 (WindowMaster chain actuators) — grouped `zap` + single `eva`
 
-ZAP использует room-local cycle-identified PI controller generation 3 с минутным расчётом recommendation, 10-минутным forecast assist и отдельным 30-минутным actuator gate. Thermal supervisor ограничивает открытие по прогнозу комнатной температуры. EVA сохраняет прежний controller.
+ZAP использует room-local cycle-identified PI controller generation 3 с минутным расчётом recommendation, 10-минутным forecast assist, selectable indoor/outdoor temperature safety и отдельным 30-минутным actuator gate. EVA сохраняет прежний controller.
 
 **Ресурс привода:** WindowMaster WMX 803 рейтинг ~10 000 циклов. С тренд-фильтром: ~20-40 движений/день → 1.5-3 года.
 
@@ -296,6 +296,9 @@ ZAP использует room-local cycle-identified PI controller generation 3 
 - `sensor.ventilation_zap_room_model`: provisional load/gain/tau, sample counts, confidence и accepted last-known-good coefficients
 - active ZAP coefficients используют history bootstrap `2.597 / 6.681 / 30.715` до promotion thresholds `4/6/4`
 - `sensor.ventilation_zap_thermal_cap`: room temperature, heating setpoint, signed deficit и quadratic 5°C cap с `min_position` floor
+- `input_boolean.ventilation_use_indoor_temperature`: `on` использует primary room → radiator valve → outdoor fallback; `off` использует только outdoor
+- `sensor.ventilation_zap_safety_temperature`: selected value, source, threshold и fallback state
+- отдельные hard thresholds: `ventilation_min_indoor_temp` и `ventilation_min_outdoor_temp`
 - `sensor.ventilation_recommended_position`: minute PI recommendation, независимая от current cover position и cooldown
 - bounded forecast assist: не более 5% room-local диапазона
 - bumpless transfer при target/min/max и accepted-model changes
@@ -329,6 +332,7 @@ ZAP использует room-local cycle-identified PI controller generation 3 
 | `sensor.ventilation_forecast_error_30m` | Template | Legacy ID; forecast error на 10 минут |
 | `sensor.ventilation_zap_room_model` | Template | Provisional и accepted room-model coefficients, counts/confidence |
 | `sensor.ventilation_zap_thermal_cap` | Template | Temperature-based upper bound для ZAP recommendation |
+| `sensor.ventilation_zap_safety_temperature` | Template | Выбранная hard-safety температура и её source/threshold |
 | `sensor.ventilation_recommended_position` | Template | Final minute recommendation после CO₂ и thermal cap (%) |
 | `sensor.ventilation_co2_error` | Template | Текущая ошибка filtered CO₂ относительно target (ppm) |
 | `sensor.ventilation_eva_co2_mean_30m` | Statistics | Сглаженный CO2 eva за 30 минут |
@@ -343,6 +347,8 @@ ZAP использует room-local cycle-identified PI controller generation 3 
 | `input_number.ventilation_target_co2` | Input | Целевой CO2 (default 650 ppm) |
 | `input_number.ventilation_min_position` | Input | Мин. позиция окна (default 0%) |
 | `input_number.ventilation_max_position` | Input | Макс. позиция окна (default 80%) |
+| `input_boolean.ventilation_use_indoor_temperature` | Input | Indoor-preferred или outdoor-only hard safety mode |
+| `input_number.ventilation_min_indoor_temp` | Input | Минимальная допустимая внутренняя температура |
 | `input_number.ventilation_min_outdoor_temp` | Input | Мин. температура улицы (default -10°C) |
 | `input_datetime.ventilation_last_adjustment` | Input | Последняя реальная регулировка zap |
 | `input_datetime.ventilation_eva_last_adjustment` | Input | Последняя реальная регулировка eva |
@@ -367,6 +373,9 @@ ZAP использует room-local cycle-identified PI controller generation 3 
 | Model sample boundary | minute 29/59 | Перед actuator gate; минимум 15 минут после movement |
 | Model promotion | counts 4/6/4 | Load/gain/tau; до promotion работает history bootstrap |
 | Thermal soft span | 5°C | Quadratic cap от `max_position` к `min_position` |
+| Safety source mode | Indoor preferred / Outdoor only | Default `on`; primary room → valve → outdoor fallback |
+| Indoor safety threshold | 16°C initial | Применяется к primary room и valve fallback |
+| Outdoor safety threshold | Existing helper state | Применяется в outdoor-only и outdoor fallback |
 | Forecast assist limit | ±5% span | Вторичный bounded term |
 | Integral limit | ±25% span | Anti-windup и bumpless transfer |
 | Actuator gate | 30 minutes | Физическое движение по `/30` |
