@@ -269,6 +269,9 @@ template:
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
+        minutes: "/1"
+        id: observation
+      - platform: time_pattern
         minutes: "29"
         id: cycle_end
       - platform: time_pattern
