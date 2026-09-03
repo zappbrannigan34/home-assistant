@@ -1,224 +1,145 @@
-# CO2 Ventilation Control — Drivent V2 (zap + eva)
+# управление вентиляцией по CO₂ — Drivent V2
 
-Автоматическое управление проветриванием для двух комнат (`zap`, `eva`) через приводы Drivent V2 на основе уровня CO2.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.1.0 новый cycle-identified PI controller и temperature protection применяются только к `zap`; EVA остаётся на существующем control law.
 
----
+## архитектурные инварианты
 
-## Почему не PID?
+- controller layer пересчитывает recommendation каждую минуту;
+- горизонт прогноза controller — 10 минут;
+- actuator layer двигает физический привод не чаще одного раза в 30 минут;
+- actuator layer не содержит CO₂, slope, deadband или temperature logic;
+- recommendation не использует current cover position либо cooldown как controller state;
+- safety close остаётся отдельным приоритетным слоем;
+- коэффициенты ZAP выводятся автоматически из принятых cycle samples.
 
-PID-регулятор дёргает привод на **каждое измерение**: CO2 постоянно меняется из-за внешних условий, и система никогда не приходит в равновесие. Результат — привод работает каждую минуту, изнашивается за год.
+30-минутный actuator gate защищает ресурс WindowMaster/Drivent. Для WindowMaster WMX 803 производитель указывает 10 000 opening/closing movements; проектный ориентир — не более 20–40 реальных движений в сутки.
 
-Этот пакет использует **двухслойное управление**:
-- **controller layer** непрерывно пересчитывает `recommended_opening`
-- **actuation layer** двигает привод не чаще чем **раз в 30 минут**
-- controller использует **EMA / low-pass**, производную по сглаженному сигналу и **30-минутный прогноз**
-- dead zone работает по `forecast_error_30m` с hysteresis `enter=50 ppm`, `exit=65 ppm` и trend-gating
+## ZAP signal chain
 
-`zap` управляется как **одна логическая группа окон** поверх двух физических приводов (`left` + `back`).
+- `sensor.sensor_zap_co2` — raw CO₂;
+- `sensor.ventilation_co2_filtered` — low-pass CO₂;
+- `sensor.ventilation_co2_slope` — 15-минутная time-weighted derivative;
+- `sensor.ventilation_forecast_co2_30m` — совместимый legacy ID, фактический горизонт 10 минут;
+- `sensor.ventilation_forecast_error_30m` — forecast error;
+- `sensor.ventilation_zap_room_model` — cycle-synchronous room model;
+- `sensor.ventilation_zap_thermal_cap` — temperature-based upper bound;
+- `sensor.ventilation_recommended_position` — final continuous recommendation;
+- `sensor.ventilation_co2_error` — текущая filtered CO₂ error.
 
-Реальных движений привода: **20-40 в день** вместо 1440 при PID.
+## cycle-identified room model
 
----
+`sensor.ventilation_zap_room_model` оценивает параметры только на границе завершённого физического цикла — на 29-й и 59-й минуте часа.
 
-## Алгоритм
+sample принимается, если:
 
-### Комнаты и логические приводы
+- после последнего движения прошло минимум 15 минут;
+- target не менялся между соседними model ticks;
+- CO₂ slope доступен;
+- overload sensors выключены;
+- sample находится в заданных bounds и не является резким relative outlier.
 
-- `zap`:
-  - CO2: `sensor.sensor_zap_co2`
-  - логический привод: `cover.ventilation_zap_group`
-  - физические приводы: `cover.drivent_zap_left_driventokonnyi_privod`, `cover.drivent_zap_back_driventokonnyi_privod`
-- `eva`:
-  - CO2: `sensor.sensor_eva_co2`
-  - привод: `cover.drivent_eva_driventokonnyi_privod`
+модель хранит:
 
-### Signal chain
+- `closed_load_estimate_ppm_min`;
+- `ventilation_gain_estimate_ppm_min_per_fraction`;
+- `tau_estimate_min`;
+- отдельные sample counts;
+- `model_confidence_pct`;
+- last-known-good estimates.
 
-Для каждой комнаты используется сигналовая цепочка:
-- `raw CO2`
-- `filtered CO2` через **EMA / low-pass**
-- `slope` по сглаженному сигналу
-- `forecast CO2 30m`
-- `forecast error 30m`
-- `continuous recommended_opening`
+оценка не обновляется на каждом sensor event и не использует actuator cooldown в recommendation.
 
-Для `zap`:
-- `sensor.ventilation_co2_filtered`
-- `sensor.ventilation_co2_slope`
-- `sensor.ventilation_forecast_co2_30m`
-- `sensor.ventilation_forecast_error_30m`
+## ZAP PI controller
 
-Для `eva`:
-- `sensor.ventilation_eva_co2_filtered`
-- `sensor.ventilation_eva_co2_slope`
-- `sensor.ventilation_eva_forecast_co2_30m`
-- `sensor.ventilation_eva_forecast_error_30m`
+`Ventilation Recommended Position` выполняется одним minute trigger.
 
-### CO2 Trend Calculator
+control law:
 
-Качественный тренд определяется по **slope сглаженного CO2**:
+`co2_demand = equilibrium_opening + Kp × error_outside_deadband + bounded_forecast_assist + integral`
 
-| Разница | Тренд |
-|---------|-------|
-| > +0.5 ppm/min | `rising` |
-| < -0.5 ppm/min | `falling` |
-| в пределах ±0.5 ppm/min | `stable` |
+- `equilibrium_opening` выводится из room load и ventilation gain;
+- `Kp` и `Ti` автоматически выводятся из gain и tau;
+- integral умножается на фактический `dt`;
+- при первом переходе на generation 3 и при изменении target/min/max используется bumpless tracking;
+- anti-windup удерживает integral на min/max и на thermal cap;
+- forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
+- final recommendation ограничивается room-local min/max.
 
-### Controller logic
+## temperature protection ZAP
 
-Ошибка считается не от сырого CO2 и не от текущего cover position, а от:
+основная room temperature:
 
-- `forecast_error_30m = forecast_co2_30m - target`
+`sensor.sensor_zap_temperature`
 
-То есть recommendation отвечает на вопрос:
+heating setpoint:
 
-> какое открытие окна нужно сейчас, чтобы через 30 минут CO2 оказался ближе к цели
+`state_attr('climate.radiator_left_zap', 'temperature')`
 
-### Dead zone + hysteresis
+`climate.radiator_back_zap` не является обязательным входом: на момент реализации entity была `unavailable`.
 
-- вход в dead zone: `abs(forecast_error_30m) <= 50 ppm`
-- удержание внутри зоны по hysteresis: пока `abs(forecast_error_30m) <= 65 ppm`
-- внутри dead zone: `hold`
-- но если slope резко уходит от цели, разрешается небольшое bias-смещение recommendation даже внутри зоны
-- hysteresis используется только для dead-zone state и не делает recommendation ступенчатой
+thermal supervisor каждую минуту:
 
-### Dynamic controller delta
+1. обновляет сглаженный room temperature slope с реальным `dt`;
+2. вычисляет `predicted_room_temperature_10m`;
+3. сравнивает прогноз с heating setpoint;
+4. формирует continuous `temperature_cap`.
 
-Вместо старых фиксированных step bands теперь recommendation вычисляется **напрямую** как continuous controller output:
+в диапазоне дефицита от 0 до 5°C quadratic cap плавно уменьшается от `max_position` к `min_position`: малый дефицит даёт небольшое призакрытие, а сильное охлаждение усиливает ограничение.
 
-- magnitude зависит от:
-  - `abs(forecast_error_30m)` за пределами dead zone
-  - `abs(slope)` и того, поддерживает ли тренд уход от цели
-- sign зависит от знака forecast error
-- recommendation не копирует actuator state, не накапливает previous recommendation и не ждёт cooldown
+`final_recommendation = min(co2_demand, temperature_cap)`
 
-### Actuation layer
+`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. При недоступной room temperature или setpoint thermal cap отключается; существующие outdoor temperature, overload и CO₂-unavailable safety automations продолжают действовать.
 
-- каждые 30 минут automation читает текущее `recommended_opening`
-- если recommendation отличается от текущего положения окна и safety/cooldown позволяют — применяет его
-- слой движения физически отделён от непрерывного расчёта recommendation
+## actuator layer
 
-### Rate Limit
+`automation.ventilation_control_main`:
 
-- Recommendation: continuous / minute-level recompute
-- Physical movement: not more often than every 30 minutes
-- Cooldown stored separately by room:
-  - `input_datetime.ventilation_last_adjustment` — zap
-  - `input_datetime.ventilation_eva_last_adjustment` — eva
+- срабатывает по `/30`;
+- читает latest `sensor.ventilation_recommended_position`;
+- при отличии от current position и выполненных safety/cooldown conditions копирует recommendation целиком;
+- обновляет `input_datetime.ventilation_last_adjustment`.
 
----
+fixed steps и дополнительные CO₂ conditions в actuator layer отсутствуют.
 
-## Безопасность
+## safety ZAP
 
-| Событие | Действие |
-|---------|---------|
-| T улицы < min порога | Закрыть окно + уведомление |
-| Перегрузка привода | Закрыть окно + уведомление |
-| CO2 сенсор unavailable (>2 мин) | Закрыть окно + уведомление |
+обычное управление блокируется, а safety automation закрывает окна при:
 
-## Состав пакета
+- наружной температуре ниже `input_number.ventilation_min_outdoor_temp`;
+- overload любого ZAP actuator;
+- недоступности `sensor.sensor_zap_co2` более двух минут.
 
-### Template Sensors
+## EVA
 
-| Sensor | Описание |
-|--------|----------|
-| `sensor.co2_trend` | Качественный тренд CO2 для zap |
-| `sensor.ventilation_co2_mean_30m` | Сглаженный CO2 для zap за 30 минут |
-| `sensor.ventilation_co2_change_30m` | Изменение CO2 для zap за 30 минут |
-| `sensor.ventilation_co2_filtered` | Непрерывно сглаженный CO2 для zap |
-| `sensor.ventilation_co2_slope` | Производная по сглаженному CO2 для zap |
-| `sensor.ventilation_forecast_co2_30m` | Прогноз CO2 для zap на 30 минут |
-| `sensor.ventilation_forecast_error_30m` | Прогнозная ошибка CO2 для zap |
-| `sensor.ventilation_recommended_position` | Continuous recommended opening для zap |
-| `sensor.ventilation_co2_error` | Forecast error для zap |
-| `sensor.eva_co2_trend` | Качественный тренд CO2 для eva |
-| `sensor.ventilation_eva_co2_mean_30m` | Сглаженный CO2 для eva за 30 минут |
-| `sensor.ventilation_eva_co2_change_30m` | Изменение CO2 для eva за 30 минут |
-| `sensor.ventilation_eva_co2_filtered` | Непрерывно сглаженный CO2 для eva |
-| `sensor.ventilation_eva_co2_slope` | Производная по сглаженному CO2 для eva |
-| `sensor.ventilation_eva_forecast_co2_30m` | Прогноз CO2 для eva на 30 минут |
-| `sensor.ventilation_eva_forecast_error_30m` | Прогнозная ошибка CO2 для eva |
-| `sensor.ventilation_eva_recommended_position` | Continuous recommended opening для eva |
-| `sensor.ventilation_eva_co2_error` | Forecast error для eva |
+EVA сохраняет существующие entities и controller:
 
-У recommendation sensors есть диагностические attributes:
+- `sensor.ventilation_eva_co2_filtered`;
+- `sensor.ventilation_eva_co2_slope`;
+- `sensor.ventilation_eva_forecast_co2_30m`;
+- `sensor.ventilation_eva_recommended_position`;
+- `automation.ventilation_eva_control_main`.
 
-- `controller_family`
-- `controller_mode`
-- `dead_zone_state`
-- `trend_gate`
-- `trend_gate_factor`
-- `error_outside_dead_zone_ppm`
-- `normalized_error_factor`
-- `slope_factor`
-- `neutral_baseline`
-- `raw_controller_output`
+ZAP model и temperature entities не используются EVA. Для EVA нужна отдельная room temperature/setpoint binding и отдельное пользовательское решение.
 
-### Input Helpers
+## основные настройки
 
-| Entity | Описание | Default |
-|--------|----------|---------|
-| `input_number.ventilation_target_co2` | Общий целевой CO2 для обеих комнат | 650 ppm |
-| `input_number.ventilation_min_position` | Общая минимальная позиция | 0% |
-| `input_number.ventilation_max_position` | Общая максимальная позиция | 80% |
-| `input_number.ventilation_min_outdoor_temp` | Общий минимум уличной температуры | -10°C |
-| `input_datetime.ventilation_last_adjustment` | Последняя реальная регулировка zap | 2000-01-01 00:00:00 |
-| `input_datetime.ventilation_eva_last_adjustment` | Последняя реальная регулировка eva | 2000-01-01 00:00:00 |
+- `input_number.ventilation_target_co2`;
+- `input_number.ventilation_min_position`;
+- `input_number.ventilation_max_position`;
+- `input_number.ventilation_deadband_ppm`;
+- `input_number.ventilation_min_outdoor_temp`;
+- `input_datetime.ventilation_last_adjustment`.
 
-### Automations
+## ZAP diagnostics
 
-| Automation | Описание |
-|------------|----------|
-| `ventilation_control_main` | Основное управление zap |
-| `ventilation_safety_close` | Аварийное закрытие zap |
-| `ventilation_device_error` | Уведомления об ошибках приводов zap |
-| `ventilation_eva_control_main` | Основное управление eva |
-| `ventilation_eva_safety_close` | Аварийное закрытие eva |
-| `ventilation_eva_device_error` | Уведомления об ошибках привода eva |
+- raw/filtered CO₂ и slope;
+- current error и 10-minute forecast;
+- recommendation и actual group position;
+- room model confidence/load/gain/tau;
+- equilibrium, automatic gains, integral и bounded forecast assist;
+- room temperature, heating setpoint, predicted temperature и thermal cap;
+- overload/safety state.
 
-### Используемые внешние entity
+**Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
-| Entity | Тип | Назначение |
-|--------|-----|-----------|
-| `sensor.sensor_zap_co2` | Source | CO2 в комнате zap (ppm) |
-| `sensor.sensor_eva_co2` | Source | CO2 в комнате eva (ppm) |
-| `cover.ventilation_zap_group` | Device | Логическая группа двух окон zap |
-| `cover.drivent_zap_left_driventokonnyi_privod` | Device | Физический привод zap left |
-| `cover.drivent_zap_back_driventokonnyi_privod` | Device | Физический привод zap back |
-| `cover.drivent_eva_driventokonnyi_privod` | Device | Привод eva |
-| `binary_sensor.drivent_zap_left_datchik_peregruzki` | Device | Перегрузка zap left |
-| `binary_sensor.drivent_zap_back_datchik_peregruzki` | Device | Перегрузка zap back |
-| `binary_sensor.drivent_eva_datchik_peregruzki` | Device | Перегрузка eva |
-| `weather.forecast_home_assistant` | Source | Уличная температура |
-
----
-
-## Установка
-
-1. Скопируйте `packages/ventilation/` в `/config/packages/`.
-2. **Перезагрузите Home Assistant** (полный рестарт — reload не создаст input_number и trigger-based sensors).
-3. Проверьте, что доступны:
-   - `sensor.sensor_zap_co2`
-   - `sensor.sensor_eva_co2`
-   - `cover.ventilation_zap_group`
-   - `cover.drivent_eva_driventokonnyi_privod`
-4. Настройте параметры через UI:
-   - Целевой CO2 (по умолчанию 650 ppm)
-   - Минимальная уличная температура (по умолчанию -10°C)
-   - Максимальная позиция окна (по умолчанию 80%)
-
----
-
-## Ресурс привода
-
-| Параметр | Значение |
-|----------|---------|
-| WindowMaster WMX 803 (аналог) | 10 000 циклов при номинальной нагрузке |
-| Drivent V2 (разработчик) | 4+ года на PID раз в минуту |
-| Этот пакет (оценка) | ~20-40 движений/день → **1.5-3 года** при 10k циклов |
-
----
-
-**Device:** Drivent V2 (Wi-Fi, MQTT)
-**Sensor:** sensor-zap (CO2, Senseair S8 или аналог)
-**Version:** 1.4.0
+**Version:** 2.1.0

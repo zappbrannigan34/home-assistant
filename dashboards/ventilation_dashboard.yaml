@@ -238,6 +238,39 @@ views:
             name: Filtered CO2
           - entity: sensor.ventilation_co2_slope
             name: CO2 Slope
+          - type: divider
+          - entity: sensor.ventilation_zap_room_model
+            name: Room Model Confidence
+          - type: attribute
+            entity: sensor.ventilation_zap_room_model
+            attribute: closed_load_estimate_ppm_min
+            name: Estimated Room Load
+          - type: attribute
+            entity: sensor.ventilation_zap_room_model
+            attribute: ventilation_gain_estimate_ppm_min_per_fraction
+            name: Estimated Ventilation Gain
+          - type: attribute
+            entity: sensor.ventilation_zap_room_model
+            attribute: tau_estimate_min
+            name: Estimated Tau
+          - entity: sensor.ventilation_zap_thermal_cap
+            name: Thermal Opening Cap
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: room_temperature
+            name: Room Temperature
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: heating_setpoint
+            name: Heating Setpoint
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: predicted_room_temperature_10m
+            name: Predicted Temperature 10m
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: temperature_deficit_c
+            name: Temperature Deficit
           - type: attribute
             entity: sensor.ventilation_recommended_position
             attribute: equilibrium_opening
