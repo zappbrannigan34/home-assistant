@@ -33,10 +33,12 @@
 sample принимается, если:
 
 - после последнего движения прошло минимум 15 минут;
-- target не менялся между соседними model ticks;
+- target/min/max не менялись между соседними model ticks;
 - CO₂ slope доступен;
 - overload sensors выключены;
 - sample находится в заданных bounds и не является резким relative outlier.
+
+оценки используют `room_load = co2_slope + ventilation_gain × opening_fraction` и `ventilation_gain = (room_load − co2_slope) / opening_fraction`, поэтому load sample не зависит от обязательного полного закрытия окна.
 
 модель хранит:
 
@@ -60,7 +62,7 @@ control law:
 - `equilibrium_opening` выводится из room load и ventilation gain;
 - `Kp` и `Ti` автоматически выводятся из gain и tau;
 - integral умножается на фактический `dt`;
-- при первом переходе на generation 3 и при изменении target/min/max используется bumpless tracking;
+- при первом переходе на generation 3, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
 - anti-windup удерживает integral на min/max и на thermal cap;
 - forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
 - final recommendation ограничивается room-local min/max.
