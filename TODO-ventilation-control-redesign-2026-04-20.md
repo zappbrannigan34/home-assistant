@@ -76,7 +76,7 @@ Build a new ventilation controller where:
 - [x] Remove or repurpose obsolete legacy controller signals if they are no longer needed.
 - [x] Clean leftover server-side junk / stale references created by earlier iterations after the new model is proven.
   - Safe inspection only: found stale unavailable registry-only helpers `input_number.ventilation_eva_*` on the server; no destructive registry surgery performed without a stronger removal plan.
-- [x] Update `packages/ventilation/README.md` and project `AGENTS.md` to match the final controller architecture.
-- [ ] Commit changes in atomic commits.
-- [ ] Push to GitHub.
+- [x] Update `packages/ventilation/README.md` and project `AI_GUIDELINES.md` to match the final controller architecture.
+- [x] Commit changes in atomic commits.
+- [x] Push to GitHub.
 - [ ] Await user confirmation that the redesign is accepted.

@@ -1,4 +1,4 @@
-# AGENTS.md — Home Assistant Automations
+# AI_GUIDELINES.md — Home Assistant Automations
 
 ## Project Overview
 
@@ -55,7 +55,7 @@ HA config directory доступен через SMB (сетевой диск):
 
 ```
 home-assistant/
-├── AGENTS.md                        # ← этот файл
+├── AI_GUIDELINES.md                 # ← этот файл
 ├── .secrets.env                     # Токены, пароли (GITIGNORED)
 ├── .gitignore
 ├── README.md
@@ -73,7 +73,7 @@ home-assistant/
     │   ├── humidity_control.yaml    # Основной YAML-пакет (v3.1.0)
     │   └── README.md               # Документация пакета
     └── ventilation/
-        ├── ventilation_control.yaml # Trend-based CO2 контроль окна (v1.0.0)
+        ├── ventilation_control.yaml # ZAP generation 3 + EVA controller (v2.1.0)
         └── README.md               # Документация пакета
 ```
 
@@ -281,27 +281,30 @@ PD-регулятор с предиктивным демпфированием �
 
 ---
 
-## Existing Package: `ventilation` (v1.4.0)
+## Existing Package: `ventilation` (v2.1.0)
 
 **Devices:** Drivent V2 (WindowMaster chain actuators) — grouped `zap` + single `eva`
 
-Continuous forecast-error CO2 ventilation control for two rooms (`zap`, `eva`). Recommendation is computed continuously from filtered CO2, slope, and 30-minute forecast error, while actuator movement remains separately gated every 30 minutes.
+ZAP использует room-local cycle-identified PI controller generation 3 с минутным расчётом recommendation, 10-минутным forecast assist и отдельным 30-минутным actuator gate. Thermal supervisor ограничивает открытие по прогнозу комнатной температуры. EVA сохраняет прежний controller.
 
 **Ресурс привода:** WindowMaster WMX 803 рейтинг ~10 000 циклов. С тренд-фильтром: ~20-40 движений/день → 1.5-3 года.
 
 Включает:
 - `statistics` sensors: `ventilation_co2_mean_30m` и `ventilation_co2_change_30m`
 - room-specific sensors for `eva`: `ventilation_eva_co2_mean_30m`, `ventilation_eva_co2_change_30m`, `eva_co2_trend`, `ventilation_eva_recommended_position`, `ventilation_eva_co2_error`
-- continuous filtered signals: `ventilation_co2_filtered`, `ventilation_co2_slope`, `ventilation_forecast_co2_30m`, `ventilation_forecast_error_30m`, EVA equivalents
-- dead zone is applied on forecast error with hysteresis (`enter=50 ppm`, `exit=65 ppm`)
-- inside dead zone: hold unless slope indicates sharp drift
-- outside dead zone: continuous controller delta changes recommendation from forecast-error magnitude and slope steepness
-- Явный cooldown через `input_datetime.ventilation_last_adjustment`
+- continuous filtered signals: `ventilation_co2_filtered`, `ventilation_co2_slope`; legacy forecast entity IDs сохраняют суффикс `_30m`, но ZAP horizon равен 10 минутам
+- `sensor.ventilation_zap_room_model`: provisional load/gain/tau, sample counts, confidence и accepted last-known-good coefficients
+- active ZAP coefficients используют history bootstrap `2.597 / 6.681 / 30.715` до promotion thresholds `4/6/4`
+- `sensor.ventilation_zap_thermal_cap`: room temperature, heating setpoint, signed deficit и quadratic 5°C cap с `min_position` floor
+- `sensor.ventilation_recommended_position`: minute PI recommendation, независимая от current cover position и cooldown
+- bounded forecast assist: не более 5% room-local диапазона
+- bumpless transfer при target/min/max и accepted-model changes
+- dumb actuator layer: `/30`, cooldown `1800`, копирование latest recommendation целиком
 - отдельный cooldown для `eva` через `input_datetime.ventilation_eva_last_adjustment`
 - grouped cover `cover.ventilation_zap_group` поверх `drivent_zap_left` + `drivent_zap_back`
-- Аварийное закрытие (холод, перегрузка, потеря CO2 сенсора)
-- Блокировку повторного открытия при холоде ниже минимального порога
-- Уведомления через `telegram_bot.send_message` → `notify.telegram_bot_8110302509_1002699581686`
+- аварийное закрытие при холоде, перегрузке и потере CO₂ sensor
+- блокировка повторного открытия ниже минимальной наружной температуры
+- уведомления через `telegram_bot.send_message` → `notify.telegram_bot_8110302509_1002699581686`
 
 ### Key Entities
 
@@ -322,10 +325,12 @@ Continuous forecast-error CO2 ventilation control for two rooms (`zap`, `eva`). 
 | `sensor.co2_trend` | Template | Качественный тренд CO2: rising/falling/stable |
 | `sensor.ventilation_co2_filtered` | Filter | Continuous filtered CO2 |
 | `sensor.ventilation_co2_slope` | Derivative | Сlope по filtered CO2 |
-| `sensor.ventilation_forecast_co2_30m` | Template | Прогноз CO2 на 30 минут |
-| `sensor.ventilation_forecast_error_30m` | Template | Forecast error на 30 минут |
-| `sensor.ventilation_recommended_position` | Template | Continuous recommended opening (%) |
-| `sensor.ventilation_co2_error` | Template | Ошибка контроллера = forecast error (ppm) |
+| `sensor.ventilation_forecast_co2_30m` | Template | Legacy ID; прогноз CO₂ на 10 минут |
+| `sensor.ventilation_forecast_error_30m` | Template | Legacy ID; forecast error на 10 минут |
+| `sensor.ventilation_zap_room_model` | Template | Provisional и accepted room-model coefficients, counts/confidence |
+| `sensor.ventilation_zap_thermal_cap` | Template | Temperature-based upper bound для ZAP recommendation |
+| `sensor.ventilation_recommended_position` | Template | Final minute recommendation после CO₂ и thermal cap (%) |
+| `sensor.ventilation_co2_error` | Template | Текущая ошибка filtered CO₂ относительно target (ppm) |
 | `sensor.ventilation_eva_co2_mean_30m` | Statistics | Сглаженный CO2 eva за 30 минут |
 | `sensor.ventilation_eva_co2_change_30m` | Statistics | Изменение CO2 eva за 30 минут |
 | `sensor.eva_co2_trend` | Template | Качественный тренд CO2 eva |
@@ -357,12 +362,15 @@ Continuous forecast-error CO2 ventilation control for two rooms (`zap`, `eva`). 
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Trend threshold | ±30 ppm | Изменение CO2 за 30 минут |
-| Evaluation interval | 30 min | Частота полноценного пересчёта рекомендуемой позиции |
-| Steps | 5/10/20/30% | Зависит от модуля ошибки и направления движения |
-| Deadband | ±40 ppm | Зона вокруг target где движения минимальны |
-| Rate limit | 30 minutes | Минимальный интервал между движениями привода |
-| Small-zone confirmation | 2 windows | Только малая зона требует 2 подряд подтверждённых 30-минутных окна |
+| Controller tick | 1 minute | Stateful PI/integral обновляются только на фиксированном tick |
+| Forecast horizon | 10 minutes | Legacy entity IDs сохраняют `_30m` только для совместимости |
+| Model sample boundary | minute 29/59 | Перед actuator gate; минимум 15 минут после movement |
+| Model promotion | counts 4/6/4 | Load/gain/tau; до promotion работает history bootstrap |
+| Thermal soft span | 5°C | Quadratic cap от `max_position` к `min_position` |
+| Forecast assist limit | ±5% span | Вторичный bounded term |
+| Integral limit | ±25% span | Anti-windup и bumpless transfer |
+| Actuator gate | 30 minutes | Физическое движение по `/30` |
+| Cooldown | 1800 seconds | Не сокращать: wear/noise constraint |
 
 ---
 
@@ -428,7 +436,7 @@ automation:
 ### Session Startup Rule
 
 В начале каждой новой сессии обязательно:
-1. Прочитать глобальный `AGENTS.md` и project `AGENTS.md`
+1. Прочитать доступные глобальные agent instructions и project `AI_GUIDELINES.md`
 2. Подтянуть/прочитать доступную память и lessons
 3. Найти и прочитать package-local `README.md`, если работа идёт внутри конкретного package
 4. Только после этого начинать исследование, правки, деплой или git-операции
@@ -823,4 +831,4 @@ input_number:
 13. **NEVER use Playwright MCP** (`skill_mcp`) — запрещено. Для скриншотов и взаимодействия с браузером использовать **только CDP** (Chrome DevTools Protocol) через прямое подключение к запущенному браузеру пользователя (`localhost:9222`). См. секцию "CDP Screenshots".
 14. **ALWAYS research BEFORE implementation** — при работе с незнакомыми библиотеками/API сначала изучить документацию, найти примеры, понять как работает. Не пытаться угадать API наугад. Инцидент: агент несколько раз подряд неправильно использовал plotly-graph-card $fn, теряя время на trial-and-error.
 15. **ALWAYS use user's running browser** — не запускать headless Chrome, не создавать новые инстансы. Подключаться к уже открытому браузеру пользователя через CDP на `localhost:9222`. Таб HA уже открыт.
-16. **ALWAYS write knowledge to AGENTS.md** — все найденные знания, паттерны, баги, готчи записывать в этот файл (`AGENTS.md`), а НЕ в OpenCode skill файлы (`~/.config/opencode/skills/`). Этот файл — единственный источник знаний для агентов проекта.
+16. **ALWAYS write project knowledge to AI_GUIDELINES.md** — все найденные знания, паттерны, баги и готчи проекта записывать в этот файл (`AI_GUIDELINES.md`), а не в OpenCode skill файлы (`~/.config/opencode/skills/`). Этот файл — единый текстовый справочник проекта для AI-инструментов.
