@@ -318,51 +318,47 @@ views:
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: indoor_minimum_temperature
-            name: Indoor Minimum
+            name: Indoor Range Lower (Min Indoor)
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: heating_setpoint
+            name: Indoor Range Upper (TRV Setpoint)
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: computed_temperature_range_c
+            name: Computed Temperature Range
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: temperature_deficit_c
+            name: Predicted Deficit from TRV
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: predicted_temperature_headroom_c
             name: Predicted Margin Above Minimum
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
-            attribute: indoor_soft_upper_temperature
-            name: Indoor Soft Range Upper Edge
+            attribute: normalized_room_factor
+            name: Normalized Room Factor
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: outdoor_minimum_temperature
-            name: Outdoor Minimum
+            name: Outdoor Threshold
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
-            attribute: outdoor_soft_lower_temperature
-            name: Outdoor Soft Range Lower Edge
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: room_range_phase
-            name: Room Range Phase
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: outdoor_range_phase
-            name: Outdoor Range Phase
+            attribute: normalized_outdoor_factor
+            name: Normalized Outdoor Factor
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: cooling_time_to_floor_minutes
             name: Estimated Minutes to Indoor Minimum
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
-            attribute: cooling_time_phase
-            name: Cooling Time Phase
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: thermal_opening_phase
-            name: Thermal Opening Phase
+            attribute: thermal_opening_factor
+            name: Thermal Opening Factor
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: thermal_limit_reason
-            name: Thermal Binding Range
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: heating_setpoint
-            name: Radiator Setpoint (Diagnostic Only)
+            name: Thermal Binding Deviation
           - type: attribute
             entity: sensor.ventilation_recommended_position
             attribute: equilibrium_opening

@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.5.0 indoor/outdoor temperature ranges, signed cooling trend, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.6.0 computed TRV-to-Min-Indoor range, signed room forecast, normalized outdoor deviation, low-CO₂ ceiling и persistent UI helpers применяются только к `zap`; EVA сохраняет прежний control law.
 
 ## архитектурные инварианты
 
@@ -66,7 +66,7 @@ control law:
 - `equilibrium_opening` выводится из room load и ventilation gain;
 - `Kp` и `Ti` автоматически выводятся из gain и tau;
 - integral умножается на фактический `dt`;
-- при первом переходе на generation 6, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
+- при первом переходе на generation 7, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
 - anti-windup удерживает integral на min/max, low-CO₂ ceiling и thermal cap;
 - forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
 - `co2_guard = max(filtered_CO₂, forecast_CO₂)`;
@@ -83,43 +83,44 @@ fallback room temperature:
 
 `sensor.radiator_left_zap_local_temperature`
 
-radiator setpoint `state_attr('climate.radiator_left_zap', 'temperature')` остаётся только диагностикой и не участвует в temperature cap.
+radiator setpoint `state_attr('climate.radiator_left_zap', 'temperature')` является верхней границей вычисляемого comfort range. При временной недоступности entity используется last-known-good числовое значение.
 
 thermal supervisor каждую минуту:
 
 1. обновляет сглаженный signed room temperature slope с фактическим `dt`;
 2. вычисляет `predicted_room_temperature_10m = room + slope × 10`;
-3. переводит прогноз в indoor range между `min_indoor` и `min_indoor + 2°C`;
-4. переводит outdoor в range между `min_outdoor − 6°C` и `min_outdoor`;
-5. при отрицательном slope считает `time_to_floor` и нормирует его на 360 минут;
-6. выбирает самый строгий из трёх range factors и квадратично переводит его в opening cap.
+3. вычисляет `temperature_range = TRV_setpoint − min_indoor`;
+4. нормирует положение прогноза внутри этого диапазона;
+5. нормирует outdoor deficit ниже `min_outdoor` на тот же вычисленный диапазон;
+6. выбирает меньший normalized factor и линейно переводит его в opening cap.
 
-`room_phase = clamp((predicted_temperature_10m - min_indoor) / 2°C, 0, 1)`
+`temperature_range = TRV_setpoint - min_indoor`
 
-`outdoor_phase = clamp(1 + (outdoor_temperature - min_outdoor) / 6°C, 0, 1)`
+`room_factor = clamp((predicted_temperature_10m - min_indoor) / temperature_range, 0, 1)`
 
-`time_to_floor = (room_temperature - min_indoor) / -slope`, только при `slope < -0.0005°C/min`
+`outdoor_deficit = max(min_outdoor - outdoor_temperature, 0)`
 
-`time_phase = clamp(time_to_floor / 360 min, 0, 1)`; при стабильной или растущей температуре `time_phase=1`
+`outdoor_factor = clamp(1 - outdoor_deficit / temperature_range, 0, 1)`
 
-`opening_phase = min(room_phase, outdoor_phase, time_phase)`
+`opening_factor = min(room_factor, outdoor_factor)`
 
-`temperature_cap = min_position + (max_position - min_position) × opening_phase²`
+`temperature_cap = min_position + (max_position - min_position) × opening_factor`
 
 следствия:
 
-- положительный slope повышает прогноз и отпускает cap; отрицательный slope понижает прогноз и ограничивает окно раньше;
-- при прогнозе `>= min_indoor + 2°C`, outdoor `>= min_outdoor` и отсутствии угрозы достичь floor в ближайшие 6 часов cap равен `max_position`;
-- при outdoor от `min_outdoor` до `min_outdoor−6°C` разрешённое открытие плавно уменьшается; ниже нижней границы остаётся `min_position`;
-- при прогнозе внутри indoor range cap плавно уменьшается; на `min_indoor` остаётся `min_position`;
-- если outdoor недоступен, outdoor phase fail-safe равен нулю;
-- hard-safety full close остаётся отдельным слоем и не смешивается с soft cap.
+- отрицательный slope понижает прогноз и уменьшает room factor; положительный slope повышает прогноз и отпускает cap;
+- на `min_indoor` room factor равен нулю; на TRV setpoint — единице;
+- outdoor выше `min_outdoor` не уменьшает opening; deficit ниже порога уменьшается пропорционально тому же computed range;
+- hardcoded indoor/outdoor temperature spans отсутствуют;
+- `cooling_time_to_floor_minutes` остаётся диагностикой и не вводит скрытую управляющую уставку;
+- при недоступном outdoor factor fail-safe равен нулю; при отсутствующем/невалидном TRV-to-floor range cap равен `min_position`;
+- hard-safety full close остаётся отдельным слоем.
 
-обязательный sanity case для настроек `min_indoor=22°C`, `min_outdoor=18°C`: при room около `26.5°C`, положительном slope, прогнозе около `26.6°C` и outdoor `21°C` все три phases равны единице, поэтому `temperature_cap=max_position`.
+обязательный sanity case при `TRV=27°C`, `min_indoor=22°C`, room/predicted около `26.5°C`, outdoor `21°C` и `min_outdoor=18°C`: computed range=`5°C`, room factor находится около верхней части диапазона, outdoor factor=`1`, поэтому cap должен быть высоким, но пропорционально ниже `max_position`; он не должен быть ни `min_position`, ни искусственно равен `max_position`.
 
 `final_recommendation = min(co2_demand, co2_ceiling, temperature_cap)`
 
-`min_position` остаётся ventilation floor. Diagnostics публикуют обе границы, signed slope, 10-minute forecast, time-to-floor, три phases и фактически binding range.
+`min_position` остаётся ventilation floor. Diagnostics публикуют setpoint/floor, computed range, signed slope, 10-minute forecast, normalized room/outdoor factors, time-to-floor и фактически binding deviation.
 
 ## actuator layer
 
@@ -139,7 +140,7 @@ fixed steps и дополнительные CO₂ conditions в actuator layer �
 - `on` — primary `sensor.sensor_zap_temperature`, затем fallback `sensor.radiator_left_zap_local_temperature`, затем наружная температура;
 - `off` — используется только наружная температура.
 
-для внутренних источников применяется `input_number.ventilation_min_indoor_temp`; для outdoor-only и outdoor fallback — `input_number.ventilation_min_outdoor_temp`. Оба пользовательских threshold восстанавливаются из Home Assistant state после restart; `ventilation_min_indoor_temp` не содержит `initial`, которое могло бы сбросить dashboard value.
+для внутренних источников применяется `input_number.ventilation_min_indoor_temp`; для outdoor-only и outdoor fallback — `input_number.ventilation_min_outdoor_temp`. Все `input_number`, `input_boolean` и `input_datetime` этого package не задают `initial`: пользовательские UI values и actuator cooldown timestamps восстанавливаются из Home Assistant state после restart.
 
 `sensor.ventilation_zap_safety_temperature` публикует выбранное значение, source, threshold и fallback state. Если ни один разрешённый источник недоступен, automation закрывает окна fail-safe.
 

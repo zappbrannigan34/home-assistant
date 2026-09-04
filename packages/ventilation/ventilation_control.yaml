@@ -1,7 +1,7 @@
 # package: ventilation_multiroom
-# Version: 2.5.0
+# Version: 2.6.0
 # Last Updated: 2026-09-04
-# Description: ZAP indoor/outdoor range thermal supervisor with signed cooling trend; EVA unchanged
+# Description: ZAP computed TRV-to-indoor range with signed forecast and persistent helpers; EVA law unchanged
 #
 # АЛГОРИТМ: Отдельный room-local PI-style controller для каждой комнаты.
 # Controller layer считает demand непрерывно по filtered CO2 error,
@@ -68,7 +68,6 @@ input_number:
     min: 10
     max: 150
     step: 5
-    initial: 50
     unit_of_measurement: "ppm"
     icon: mdi:arrow-left-right
     mode: box
@@ -78,7 +77,6 @@ input_number:
     min: 300
     max: 1000
     step: 50
-    initial: 650
     unit_of_measurement: "ppm"
     icon: mdi:molecule-co2
     mode: box
@@ -106,7 +104,6 @@ input_number:
     min: -30
     max: 10
     step: 1
-    initial: -10
     unit_of_measurement: "°C"
     icon: mdi:thermometer-alert
     mode: box
@@ -116,7 +113,6 @@ input_number:
     min: 10
     max: 150
     step: 5
-    initial: 50
     unit_of_measurement: "ppm"
     icon: mdi:arrow-left-right
     mode: box
@@ -125,7 +121,6 @@ input_boolean:
   ventilation_use_indoor_temperature:
     name: "Ventilation Use Indoor Temperature"
     icon: mdi:home-thermometer-outline
-    initial: true
 
 input_datetime:
   ventilation_last_adjustment:
@@ -133,14 +128,12 @@ input_datetime:
     has_date: true
     has_time: true
     icon: mdi:clock-check-outline
-    initial: "2000-01-01 00:00:00"
 
   ventilation_eva_last_adjustment:
     name: "Ventilation Eva Last Adjustment"
     has_date: true
     has_time: true
     icon: mdi:clock-check-outline
-    initial: "2000-01-01 00:00:00"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  GROUPED COVERS (логические приводы комнаты)
@@ -599,6 +592,12 @@ template:
             {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
             {% set indoor_floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
             {% set outdoor_floor = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
+            {% set setpoint_raw = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and setpoint_raw is not none and is_number(setpoint_raw) %}
+            {% set previous_setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {% set setpoint_available = live_setpoint_valid or (previous_setpoint is not none and is_number(previous_setpoint)) %}
+            {% set setpoint = setpoint_raw | float if live_setpoint_valid else previous_setpoint | float if setpoint_available else indoor_floor %}
+            {% set temperature_range = setpoint - indoor_floor %}
             {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
             {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
             {% set span = [max_pos - min_pos, 0] | max %}
@@ -613,19 +612,15 @@ template:
             {% set alpha = [dt / 5, 1] | min %}
             {% set slope = previous_slope + alpha * (sample - previous_slope) %}
             {% set predicted = room + slope * 10 %}
-            {% set indoor_band = 2.0 %}
-            {% set outdoor_band = 6.0 %}
-            {% set time_horizon = 360.0 %}
-            {% set room_phase = [[[(predicted - indoor_floor) / indoor_band, 0] | max, 1] | min, 0] | max %}
-            {% set outdoor_phase = [[[(1 + ((outdoor_raw | float) - outdoor_floor) / outdoor_band) if outdoor_valid else 0, 0] | max, 1] | min, 0] | max %}
-            {% if slope < -0.0005 %}
-              {% set time_to_floor = [((room - indoor_floor) / (0 - slope)), 0] | max %}
-              {% set time_phase = [[[time_to_floor / time_horizon, 0] | max, 1] | min, 0] | max %}
+            {% if not setpoint_available or temperature_range <= 0 %}
+              {{ min_pos | round(1) }}
             {% else %}
-              {% set time_phase = 1 %}
+              {% set room_factor = [[[(predicted - indoor_floor) / temperature_range, 0] | max, 1] | min, 0] | max %}
+              {% set outdoor_deficit = [outdoor_floor - (outdoor_raw | float), 0] | max if outdoor_valid else temperature_range %}
+              {% set outdoor_factor = [[[(1 - outdoor_deficit / temperature_range), 0] | max, 1] | min, 0] | max %}
+              {% set opening_factor = [room_factor, outdoor_factor] | min %}
+              {{ (min_pos + span * opening_factor) | round(1) }}
             {% endif %}
-            {% set opening_phase = [room_phase, outdoor_phase, time_phase] | min %}
-            {{ (min_pos + span * opening_phase * opening_phase) | round(1) }}
           {% endif %}
         attributes:
           room_temperature: >
@@ -637,8 +632,9 @@ template:
           heating_setpoint: >
             {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
             {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
-            {{ live | float if live_valid else none }}
-          heating_setpoint_used_for_control: false
+            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {{ live | float if live_valid else previous | float if previous is not none and is_number(previous) else none }}
+          heating_setpoint_used_for_control: true
           room_temperature_slope_c_per_min: >
             {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
@@ -670,42 +666,39 @@ template:
             {% endif %}
           indoor_minimum_temperature: "{{ states('input_number.ventilation_min_indoor_temp') | float(16) }}"
           outdoor_minimum_temperature: "{{ states('input_number.ventilation_min_outdoor_temp') | float(-10) }}"
-          temperature_deficit_c: >
+          computed_temperature_range_c: >
             {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
+            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {{ ((setpoint | float) - floor) | round(2) if setpoint is not none and is_number(setpoint) and (setpoint | float) > floor else none }}
+          temperature_deficit_c: >
+            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
             {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {{ (floor - (predicted | float)) | round(2) if predicted is not none and is_number(predicted) else none }}
+            {{ ((setpoint | float) - (predicted | float)) | round(2) if setpoint is not none and is_number(setpoint) and predicted is not none and is_number(predicted) else none }}
           predicted_temperature_headroom_c: >
             {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
             {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
             {{ ((predicted | float) - floor) | round(2) if predicted is not none and is_number(predicted) else none }}
-          indoor_soft_band_c: 2.0
-          indoor_soft_upper_temperature: "{{ (states('input_number.ventilation_min_indoor_temp') | float(16) + 2) | round(1) }}"
-          outdoor_soft_band_c: 6.0
-          outdoor_soft_lower_temperature: "{{ (states('input_number.ventilation_min_outdoor_temp') | float(-10) - 6) | round(1) }}"
-          room_range_phase: >
+          normalized_room_factor: >
             {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
+            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
             {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {{ ([[[((predicted | float) - floor) / 2, 0] | max, 1] | min, 0] | max) | round(4) if predicted is not none and is_number(predicted) else none }}
-          outdoor_range_phase: >
+            {% set range = (setpoint | float) - floor if setpoint is not none and is_number(setpoint) else 0 %}
+            {{ ([[[((predicted | float) - floor) / range, 0] | max, 1] | min, 0] | max) | round(4) if predicted is not none and is_number(predicted) and range > 0 else 0 }}
+          normalized_outdoor_factor: >
             {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
             {% set threshold = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-            {{ ([[[(1 + ((outdoor | float) - threshold) / 6), 0] | max, 1] | min, 0] | max) | round(4) if outdoor is not none and is_number(outdoor) else 0 }}
+            {% set range = state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) %}
+            {% set deficit = [threshold - (outdoor | float), 0] | max if outdoor is not none and is_number(outdoor) else range %}
+            {{ ([[[(1 - deficit / range), 0] | max, 1] | min, 0] | max) | round(4) if range > 0 else 0 }}
           cooling_time_to_floor_minutes: >
             {% set room = states('sensor.ventilation_zap_safety_temperature') %}
             {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
             {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
             {{ ([((room | float) - floor) / (0 - slope), 0] | max) | round(1) if is_number(room) and slope < -0.0005 else none }}
-          cooling_time_phase: >
-            {% set room = states('sensor.ventilation_zap_safety_temperature') %}
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {% set ttf = [((room | float) - floor) / (0 - slope), 0] | max if is_number(room) and slope < -0.0005 else 360 %}
-            {{ ([[[ttf / 360, 0] | max, 1] | min, 0] | max) | round(4) }}
-          thermal_opening_phase: >
-            {% set room_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'room_range_phase') | float(1) %}
-            {% set outdoor_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'outdoor_range_phase') | float(0) %}
-            {% set time_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'cooling_time_phase') | float(1) %}
-            {{ ([room_phase, outdoor_phase, time_phase] | min) | round(4) }}
+          thermal_opening_factor: >
+            {% set room_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) %}
+            {% set outdoor_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) %}
+            {{ ([room_factor, outdoor_factor] | min) | round(4) }}
           outdoor_heat_loss_risk: >
             {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
             {% set threshold = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
@@ -719,27 +712,31 @@ template:
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
             {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set room_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'room_range_phase') | float(1) %}
-            {% set outdoor_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'outdoor_range_phase') | float(0) %}
-            {% set time_phase = state_attr('sensor.ventilation_zap_thermal_cap', 'cooling_time_phase') | float(1) %}
+            {% set range = state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) %}
+            {% set room_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) %}
+            {% set outdoor_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) %}
             {% if is_state('input_boolean.ventilation_use_indoor_temperature', 'off') %}
               inactive_external_only_mode
             {% elif source not in ['primary_room', 'radiator_valve'] %}
               inactive_internal_temperature_unavailable
+            {% elif range <= 0 %}
+              invalid_computed_temperature_range_fail_safe
             {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) >= max_pos - 0.1 %}
-              inactive_above_all_soft_ranges
+              inactive_at_computed_range_top
             {% elif outdoor is none or not is_number(outdoor) %}
               outdoor_unavailable_fail_safe
-            {% elif outdoor_phase <= room_phase and outdoor_phase <= time_phase %}
-              outdoor_temperature_range
-            {% elif time_phase <= room_phase %}
-              cooling_time_to_indoor_minimum
+            {% elif outdoor_factor <= room_factor %}
+              outdoor_deviation_inside_computed_range
             {% else %}
-              indoor_temperature_range
+              predicted_room_deviation_inside_computed_range
             {% endif %}
           minimum_ventilation_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
           outdoor_temperature: "{{ state_attr('weather.forecast_home_assistant', 'temperature') | float(0) }}"
-          heating_setpoint_source: diagnostic_only_climate.radiator_left_zap
+          heating_setpoint_source: >
+            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
+            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {{ 'climate.radiator_left_zap' if live_valid else 'last_known_good' if previous is not none and is_number(previous) else 'unavailable' }}
           previous_room_temperature: >
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
             {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
@@ -847,7 +844,7 @@ template:
           {% set previous_max = state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) %}
           {% set settings_changed = previous_target != target or previous_min != min_pos or previous_max != max_pos %}
           {% set without_integral = equilibrium + kp * error_outside + assist %}
-          {% if generation != 6 or settings_changed or model_changed or trigger.id == 'startup' %}
+          {% if generation != 7 or settings_changed or model_changed or trigger.id == 'startup' %}
             {% set integral = previous_demand - without_integral %}
           {% elif (without_integral + previous_integral >= upper and error_outside > 0) or (without_integral + previous_integral <= min_pos and error_outside < 0) %}
             {% set integral = previous_integral %}
@@ -869,8 +866,8 @@ template:
           min_position: "{{ states('input_number.ventilation_min_position') | int(0) }}"
           max_position: "{{ states('input_number.ventilation_max_position') | int(80) }}"
           deadband_ppm: "{{ states('input_number.ventilation_deadband_ppm') | float(50) }}"
-          controller_generation: 6
-          controller_family: room_pi_cycle_identified_dual_ceiling_temperature_ranges
+          controller_generation: 7
+          controller_family: room_pi_cycle_identified_dual_ceiling_computed_temperature_range
           current_applied_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) }}"
           room_model_confidence_pct: "{{ states('sensor.ventilation_zap_room_model') | float(0) }}"
           room_model_state: "{{ state_attr('sensor.ventilation_zap_room_model', 'model_state') | default('learning', true) }}"
@@ -898,18 +895,18 @@ template:
             {{ [filtered, forecast] | max < target + deadband }}
           room_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature') | float(0) }}"
           heating_setpoint: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') | float(0) }}"
-          heating_setpoint_used_for_control: false
+          heating_setpoint_used_for_control: true
           indoor_minimum_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'indoor_minimum_temperature') | float(0) }}"
           outdoor_minimum_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'outdoor_minimum_temperature') | float(0) }}"
+          computed_temperature_range_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) }}"
           room_temperature_slope_c_per_min: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) }}"
           predicted_room_temperature_10m: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') | float(0) }}"
           temperature_deficit_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'temperature_deficit_c') | float(0) }}"
           predicted_temperature_headroom_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_temperature_headroom_c') | float(0) }}"
-          room_range_phase: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'room_range_phase') | float(1) }}"
-          outdoor_range_phase: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'outdoor_range_phase') | float(1) }}"
+          normalized_room_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) }}"
+          normalized_outdoor_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) }}"
           cooling_time_to_floor_minutes: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'cooling_time_to_floor_minutes') }}"
-          cooling_time_phase: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'cooling_time_phase') | float(1) }}"
-          thermal_opening_phase: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_opening_phase') | float(1) }}"
+          thermal_opening_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_opening_factor') | float(0) }}"
           thermal_limit_reason: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_limit_reason') | default('unknown', true) }}"
           last_update_ts: "{{ as_timestamp(now()) }}"
           previous_target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
@@ -965,7 +962,7 @@ template:
             {% set raw = state_attr('sensor.ventilation_recommended_position', 'raw_controller_output') | float(min_pos) %}
             {% set error = filtered - target %}
             {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% if state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) != 6 %}
+            {% if state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) != 7 %}
               bumpless_tracking
             {% elif raw >= upper and error_outside > 0 %}
               {{ 'low_co2_ceiling_hold' if co2_ceiling <= thermal_cap else 'thermal_cap_hold' }}
@@ -1058,7 +1055,7 @@ template:
             {% set generation = state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) %}
             {% set settings_changed = state_attr('sensor.ventilation_recommended_position', 'previous_target') | float(target) != target or state_attr('sensor.ventilation_recommended_position', 'previous_min_position') | float(min_pos) != min_pos or state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) != max_pos %}
             {% set without_integral = equilibrium + kp * error_outside + assist %}
-            {% if generation != 6 or settings_changed or model_changed or trigger.id == 'startup' %}
+            {% if generation != 7 or settings_changed or model_changed or trigger.id == 'startup' %}
               {% set updated = previous_demand - without_integral %}
             {% elif (without_integral + previous >= upper and error_outside > 0) or (without_integral + previous <= min_pos and error_outside < 0) %}
               {% set updated = previous %}
