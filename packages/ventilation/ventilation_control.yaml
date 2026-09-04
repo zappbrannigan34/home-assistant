@@ -1,7 +1,7 @@
 # package: ventilation_multiroom
-# Version: 2.3.0
+# Version: 2.4.0
 # Last Updated: 2026-09-04
-# Description: ZAP comfort-margin thermal cap and low-CO2 ceiling; EVA unchanged
+# Description: ZAP setpoint-tracking thermal cap and low-CO2 ceiling; EVA unchanged
 #
 # АЛГОРИТМ: Отдельный room-local PI-style controller для каждой комнаты.
 # Controller layer считает demand непрерывно по filtered CO2 error,
@@ -594,13 +594,14 @@ template:
           {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
           {% set room_source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
           {% set room_valid = indoor_mode and room_source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-          {% set setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
-          {% if not room_valid or not setpoint_valid %}
+          {% if not room_valid %}
             {{ max_pos | round(1) }}
           {% else %}
             {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
-            {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') | float %}
-            {% set indoor_floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
+            {% set setpoint_raw = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and setpoint_raw is not none and is_number(setpoint_raw) %}
+            {% set previous_setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {% set setpoint_available = live_setpoint_valid or (previous_setpoint is not none and is_number(previous_setpoint)) %}
             {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
             {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
             {% set span = [max_pos - min_pos, 0] | max %}
@@ -616,9 +617,17 @@ template:
             {% set slope = previous_slope + alpha * (sample - previous_slope) %}
             {% set predicted = room + slope * 10 %}
             {% set heat_loss_risk = not outdoor_valid or outdoor_raw | float < room %}
-            {% set comfort_band = [setpoint - indoor_floor, 1] | max %}
-            {% set remaining_margin = [[[(predicted - indoor_floor) / comfort_band, 0] | max, 1] | min, 0] | max %}
-            {{ (max_pos if predicted >= setpoint or not heat_loss_risk else min_pos + span * remaining_margin * remaining_margin) | round(1) }}
+            {% if not heat_loss_risk %}
+              {{ max_pos | round(1) }}
+            {% elif not setpoint_available %}
+              {{ min_pos | round(1) }}
+            {% else %}
+              {% set setpoint = setpoint_raw | float if live_setpoint_valid else previous_setpoint | float %}
+              {% set headroom_band = 2.0 %}
+              {% set headroom_phase = [[[(predicted - setpoint) / headroom_band, 0] | max, 1] | min, 0] | max %}
+              {% set headroom_smooth = headroom_phase * headroom_phase * (3 - 2 * headroom_phase) %}
+              {{ (min_pos + span * headroom_smooth) | round(1) }}
+            {% endif %}
           {% endif %}
         attributes:
           room_temperature: >
@@ -628,8 +637,10 @@ template:
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
             {{ source if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] else 'inactive' }}
           heating_setpoint: >
-            {% set valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
-            {{ state_attr('climate.radiator_left_zap', 'temperature') | float if valid else none }}
+            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
+            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {{ live | float if live_valid else previous | float if previous is not none and is_number(previous) else none }}
           room_temperature_slope_c_per_min: >
             {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
@@ -660,18 +671,18 @@ template:
               {{ (room + slope * 10) | round(2) }}
             {% endif %}
           temperature_deficit_c: >
-            {% set setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
+            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
             {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {% if not setpoint_valid or predicted is none %}
+            {% if setpoint is none or not is_number(setpoint) or predicted is none or not is_number(predicted) %}
               {{ none }}
             {% else %}
-              {{ ((state_attr('climate.radiator_left_zap', 'temperature') | float) - (predicted | float)) | round(2) }}
+              {{ ((setpoint | float) - (predicted | float)) | round(2) }}
             {% endif %}
-          comfort_floor_temperature: "{{ states('input_number.ventilation_min_indoor_temp') | float(16) }}"
-          comfort_band_c: >
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set setpoint = state_attr('climate.radiator_left_zap', 'temperature') %}
-            {{ ([((setpoint | float) - floor), 1] | max) | round(2) if setpoint is not none else none }}
+          predicted_temperature_headroom_c: >
+            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
+            {{ ((predicted | float) - (setpoint | float)) | round(2) if setpoint is not none and is_number(setpoint) and predicted is not none and is_number(predicted) else none }}
+          temperature_headroom_band_c: 2.0
           outdoor_heat_loss_risk: >
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
             {% set room_valid = source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
@@ -680,25 +691,34 @@ template:
           thermal_limit_active: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set inputs_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') and states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and state_attr('climate.radiator_left_zap', 'temperature') is not none %}
-            {{ inputs_valid and states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
+            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
+            {{ room_valid and states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
           thermal_limit_reason: >
             {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
+            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
+            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
             {% if is_state('input_boolean.ventilation_use_indoor_temperature', 'off') %}
               inactive_external_only_mode
             {% elif source not in ['primary_room', 'radiator_valve'] %}
               inactive_internal_temperature_unavailable
-            {% elif states('climate.radiator_left_zap') in ['unknown', 'unavailable'] or state_attr('climate.radiator_left_zap', 'temperature') is none %}
-              inactive_heating_setpoint_unavailable
+            {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 and live_valid %}
+              setpoint_headroom_with_outdoor_heat_loss
+            {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 and previous is not none and is_number(previous) %}
+              setpoint_headroom_last_known_good
             {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 %}
-              comfort_margin_with_outdoor_heat_loss
+              setpoint_unavailable_fail_safe_minimum
             {% else %}
-              inactive
+              inactive_no_outdoor_heat_loss_risk
             {% endif %}
           minimum_ventilation_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
           outdoor_temperature: "{{ state_attr('weather.forecast_home_assistant', 'temperature') | float(0) }}"
-          heating_setpoint_source: climate.radiator_left_zap
+          heating_setpoint_source: >
+            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
+            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
+            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
+            {{ 'climate.radiator_left_zap' if live_valid else 'last_known_good' if previous is not none and is_number(previous) else 'unavailable' }}
           previous_room_temperature: >
             {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
             {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
@@ -806,7 +826,7 @@ template:
           {% set previous_max = state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) %}
           {% set settings_changed = previous_target != target or previous_min != min_pos or previous_max != max_pos %}
           {% set without_integral = equilibrium + kp * error_outside + assist %}
-          {% if generation != 4 or settings_changed or model_changed or trigger.id == 'startup' %}
+          {% if generation != 5 or settings_changed or model_changed or trigger.id == 'startup' %}
             {% set integral = previous_demand - without_integral %}
           {% elif (without_integral + previous_integral >= upper and error_outside > 0) or (without_integral + previous_integral <= min_pos and error_outside < 0) %}
             {% set integral = previous_integral %}
@@ -828,8 +848,8 @@ template:
           min_position: "{{ states('input_number.ventilation_min_position') | int(0) }}"
           max_position: "{{ states('input_number.ventilation_max_position') | int(80) }}"
           deadband_ppm: "{{ states('input_number.ventilation_deadband_ppm') | float(50) }}"
-          controller_generation: 4
-          controller_family: room_pi_cycle_identified_dual_ceiling_thermal_guarded
+          controller_generation: 5
+          controller_family: room_pi_cycle_identified_dual_ceiling_setpoint_tracking
           current_applied_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) }}"
           room_model_confidence_pct: "{{ states('sensor.ventilation_zap_room_model') | float(0) }}"
           room_model_state: "{{ state_attr('sensor.ventilation_zap_room_model', 'model_state') | default('learning', true) }}"
@@ -910,7 +930,7 @@ template:
             {% set signal = [filtered, forecast] | max %}
             {% set phase = [[[(signal - (target - deadband)) / ([2 * deadband, 1] | max), 0] | max, 1] | min, 0] | max %}
             {% set co2_ceiling = min_pos + (max_pos - min_pos) * phase * phase * (3 - 2 * phase) %}
-            {% if state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) != 4 %}
+            {% if state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) != 5 %}
               bumpless_tracking
             {% elif co2_ceiling <= thermal_cap and co2_ceiling < max_pos - 0.1 and demand >= co2_ceiling - 0.1 %}
               low_co2_ceiling_hold
@@ -1005,7 +1025,7 @@ template:
             {% set generation = state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) %}
             {% set settings_changed = state_attr('sensor.ventilation_recommended_position', 'previous_target') | float(target) != target or state_attr('sensor.ventilation_recommended_position', 'previous_min_position') | float(min_pos) != min_pos or state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) != max_pos %}
             {% set without_integral = equilibrium + kp * error_outside + assist %}
-            {% if generation != 4 or settings_changed or model_changed or trigger.id == 'startup' %}
+            {% if generation != 5 or settings_changed or model_changed or trigger.id == 'startup' %}
               {% set updated = previous_demand - without_integral %}
             {% elif (without_integral + previous >= upper and error_outside > 0) or (without_integral + previous <= min_pos and error_outside < 0) %}
               {% set updated = previous %}

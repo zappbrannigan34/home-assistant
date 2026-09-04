@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.3.0 comfort-margin temperature safety, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.4.0 setpoint-tracking temperature regulation, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
 
 ## архитектурные инварианты
 
@@ -66,7 +66,7 @@ control law:
 - `equilibrium_opening` выводится из room load и ventilation gain;
 - `Kp` и `Ti` автоматически выводятся из gain и tau;
 - integral умножается на фактический `dt`;
-- при первом переходе на generation 4, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
+- при первом переходе на generation 5, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
 - anti-windup удерживает integral на min/max, low-CO₂ ceiling и thermal cap;
 - forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
 - `co2_guard = max(filtered_CO₂, forecast_CO₂)`;
@@ -89,19 +89,27 @@ thermal supervisor каждую минуту:
 
 1. обновляет сглаженный room temperature slope с реальным `dt`;
 2. вычисляет `predicted_room_temperature_10m`;
-3. сравнивает прогноз с heating setpoint и пользовательским indoor hard floor;
+3. сравнивает прогноз непосредственно с heating setpoint;
 4. считает outdoor heat-loss risk активным, когда наружный источник холоднее комнаты либо недоступен;
-5. формирует continuous `temperature_cap` по квадрату оставшейся comfort margin.
+5. формирует continuous `temperature_cap` по прогнозному запасу выше setpoint.
 
-`comfort_margin = clamp((predicted_temperature - indoor_floor) / max(heating_setpoint - indoor_floor, 1°C), 0, 1)`
+`headroom = predicted_temperature - heating_setpoint`
 
-`temperature_cap = min_position + (max_position - min_position) × comfort_margin²`
+`phase = clamp(headroom / 2°C, 0, 1)`
 
-если прогноз не ниже setpoint или снаружи не холоднее комнаты, thermal cap равен `max_position`.
+`temperature_cap = min_position + (max_position - min_position) × smoothstep(phase)`
+
+следствия:
+
+- при прогнозе на setpoint или ниже cap равен `min_position`;
+- от setpoint до `setpoint + 2°C` cap плавно растёт;
+- только при прогнозе не менее чем на 2°C выше setpoint разрешён полный `max_position`;
+- если отопительный entity недоступен, используется последний числовой setpoint; если его ещё нет и наружный воздух холоднее комнаты, cap fail-safe равен `min_position`;
+- indoor hard floor не участвует в этой формуле и остаётся отдельной аварийной защитой.
 
 `final_recommendation = min(co2_demand, co2_ceiling, temperature_cap)`
 
-`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. Полное закрытие выполняет отдельный hard-safety слой при selected temperature на пороге или ниже. `temperature_deficit_c` остаётся signed diagnostic. При недоступной room temperature или setpoint sensor сохраняет numeric cap=`max_position` с явной inactive-причиной; существующие temperature-source, overload и CO₂-unavailable safety automations продолжают действовать.
+`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. Полное закрытие выполняет отдельный hard-safety слой. `temperature_deficit_c` и `predicted_temperature_headroom_c` — signed diagnostics setpoint tracking.
 
 ## actuator layer
 

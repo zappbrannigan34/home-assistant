@@ -73,7 +73,7 @@ home-assistant/
     │   ├── humidity_control.yaml    # Основной YAML-пакет (v3.1.0)
     │   └── README.md               # Документация пакета
     └── ventilation/
-        ├── ventilation_control.yaml # ZAP generation 4 dual-ceiling safety (v2.3.0)
+        ├── ventilation_control.yaml # ZAP generation 5 setpoint tracking (v2.4.0)
         └── README.md               # Документация пакета
 ```
 
@@ -281,11 +281,11 @@ PD-регулятор с предиктивным демпфированием �
 
 ---
 
-## Existing Package: `ventilation` (v2.3.0)
+## Existing Package: `ventilation` (v2.4.0)
 
 **Devices:** Drivent V2 (WindowMaster chain actuators) — grouped `zap` + single `eva`
 
-ZAP использует room-local cycle-identified PI controller generation 4 с минутным расчётом recommendation, 10-минутным forecast assist, smooth low-CO₂ ceiling, comfort-margin indoor/outdoor thermal cap и отдельным 30-минутным actuator gate. EVA сохраняет прежний controller.
+ZAP использует room-local cycle-identified PI controller generation 5 с минутным расчётом recommendation, 10-минутным forecast assist, smooth low-CO₂ ceiling, setpoint-headroom temperature regulation и отдельным 30-минутным actuator gate. EVA сохраняет прежний controller.
 
 **Ресурс привода:** WindowMaster WMX 803 рейтинг ~10 000 циклов. С тренд-фильтром: ~20-40 движений/день → 1.5-3 года.
 
@@ -295,10 +295,10 @@ ZAP использует room-local cycle-identified PI controller generation 4 
 - continuous filtered signals: `ventilation_co2_filtered`, `ventilation_co2_slope`; legacy forecast entity IDs сохраняют суффикс `_30m`, но ZAP horizon равен 10 минутам
 - `sensor.ventilation_zap_room_model`: provisional load/gain/tau, sample counts, confidence и accepted last-known-good coefficients
 - active ZAP coefficients используют history bootstrap `2.597 / 6.681 / 30.715` до promotion thresholds `4/6/4`
-- `sensor.ventilation_zap_thermal_cap`: predicted room temperature, indoor hard floor, heating setpoint, outdoor heat-loss risk и remaining-comfort-margin² cap с `min_position` floor
+- `sensor.ventilation_zap_thermal_cap`: predicted room temperature, heating setpoint, 2°C setpoint headroom band, outdoor heat-loss risk и last-known-good setpoint fallback; cap=`min_position` при прогнозе на setpoint или ниже
 - `input_boolean.ventilation_use_indoor_temperature`: `on` использует primary room → radiator valve → outdoor fallback; `off` использует только outdoor
 - `sensor.ventilation_zap_safety_temperature`: selected value, source, threshold и fallback state
-- отдельные включительные hard thresholds: `ventilation_min_indoor_temp` и `ventilation_min_outdoor_temp`
+- отдельные включительные hard thresholds: `ventilation_min_indoor_temp` и `ventilation_min_outdoor_temp`; они не участвуют в soft setpoint regulation
 - `sensor.ventilation_recommended_position`: minute PI recommendation, smooth low-CO₂ ceiling и финальный минимум из PI/CO₂/thermal constraints, независимый от current cover position и cooldown
 - bounded forecast assist: не более 5% room-local диапазона
 - bumpless transfer при target/min/max и accepted-model changes
