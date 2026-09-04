@@ -139,7 +139,7 @@ fixed steps и дополнительные CO₂ conditions в actuator layer �
 - `on` — primary `sensor.sensor_zap_temperature`, затем fallback `sensor.radiator_left_zap_local_temperature`, затем наружная температура;
 - `off` — используется только наружная температура.
 
-для внутренних источников применяется `input_number.ventilation_min_indoor_temp`; для outdoor-only и outdoor fallback — `input_number.ventilation_min_outdoor_temp`.
+для внутренних источников применяется `input_number.ventilation_min_indoor_temp`; для outdoor-only и outdoor fallback — `input_number.ventilation_min_outdoor_temp`. Оба пользовательских threshold восстанавливаются из Home Assistant state после restart; `ventilation_min_indoor_temp` не содержит `initial`, которое могло бы сбросить dashboard value.
 
 `sensor.ventilation_zap_safety_temperature` публикует выбранное значение, source, threshold и fallback state. Если ни один разрешённый источник недоступен, automation закрывает окна fail-safe.
 

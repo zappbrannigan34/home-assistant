@@ -298,7 +298,7 @@ ZAP использует room-local cycle-identified PI controller generation 6 
 - `sensor.ventilation_zap_thermal_cap`: signed room slope, 10-minute room forecast, indoor range `min_indoor..min_indoor+2°C`, outdoor range `min_outdoor−6°C..min_outdoor`, 360-minute time-to-floor phase и квадратичный minimum-factor cap; radiator setpoint только diagnostic
 - `input_boolean.ventilation_use_indoor_temperature`: `on` использует primary room → radiator valve → outdoor fallback; `off` использует только outdoor
 - `sensor.ventilation_zap_safety_temperature`: selected value, source, threshold и fallback state
-- отдельные включительные hard thresholds: `ventilation_min_indoor_temp` и `ventilation_min_outdoor_temp`; hard close остаётся отдельным от soft range cap
+- отдельные включительные hard thresholds: `ventilation_min_indoor_temp` и `ventilation_min_outdoor_temp`; hard close остаётся отдельным от soft range cap; helpers не должны задавать `initial`, сбрасывающий пользовательские dashboard values после Core restart
 - обязательная truth table: при `room≈26.5°C`, положительном slope, `min_indoor=22°C`, `outdoor≈21°C`, `min_outdoor=18°C` thermal cap должен быть `max_position`; TRV setpoint не является control boundary
 - `sensor.ventilation_recommended_position`: minute PI recommendation, smooth low-CO₂ ceiling и финальный минимум из PI/CO₂/thermal constraints, независимый от current cover position и cooldown
 - bounded forecast assist: не более 5% room-local диапазона
