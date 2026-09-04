@@ -31,33 +31,6 @@ views:
             connectgaps: true
             showlegend: true
 
-          - entity: sensor.ventilation_co2_error
-            name: Error
-            yaxis: y2
-            filters:
-              - sliding_window_moving_average:
-                  window_size: 2
-                  relative_to_visible: true
-              - fn: |-
-                  ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
-                    if (nums.length > 0) {
-                      vars.err_min = Math.min(...nums);
-                      vars.err_max = Math.max(...nums);
-                    } else {
-                      vars.err_min = -100;
-                      vars.err_max = 100;
-                    }
-                    return null;
-                  }
-            line:
-              color: '#F44336'
-              width: 1
-              shape: spline
-              smoothing: 1
-            connectgaps: true
-            showlegend: true
-
           - entity: cover.ventilation_zap_group
             attribute: current_position
             name: Window
@@ -72,6 +45,17 @@ views:
         layout:
           height: 600
           shapes:
+            - type: rect
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex (parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650) - (parseFloat(hass.states['input_number.ventilation_deadband_ppm']?.state) || 50)
+              y1: $ex (parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650) + (parseFloat(hass.states['input_number.ventilation_deadband_ppm']?.state) || 50)
+              fillcolor: rgba(255, 152, 0, 0.08)
+              line:
+                width: 0
+              layer: below
             - type: line
               xref: paper
               x0: 0
@@ -83,17 +67,6 @@ views:
                 color: '#FF9800'
                 width: 2
                 dash: dot
-            - type: line
-              xref: paper
-              x0: 0
-              x1: 1
-              yref: y2
-              y0: 0
-              y1: 0
-              line:
-                color: '#ffffff'
-                width: 1
-                dash: dash
           xaxis:
             rangeselector:
               "y": 1.1
@@ -124,23 +97,10 @@ views:
                 const target = parseFloat(hass.states['input_number.ventilation_target_co2']?.state) || 650;
                 const cMin = vars.co2_min ?? target;
                 const cMax = vars.co2_max ?? target;
-                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), 30);
+                const deadband = parseFloat(hass.states['input_number.ventilation_deadband_ppm']?.state) || 50;
+                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), deadband, 30);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
-              }
-          yaxis2:
-            title: Error (ppm)
-            side: right
-            overlaying: "y"
-            showgrid: false
-            fixedrange: true
-            range: |-
-              $fn ({vars}) => {
-                const eMin = vars.err_min ?? -100;
-                const eMax = vars.err_max ?? 100;
-                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
-                const padded = maxErr * 1.15;
-                return [-padded, padded];
               }
           yaxis3:
             visible: false
@@ -230,205 +190,30 @@ views:
             needle: true
 
       - type: entities
-        title: Zap Diagnostics
+        title: Zap Controls
         show_header_toggle: false
         state_color: true
         view_layout:
           position: sidebar
         entities:
-          - entity: sensor.sensor_zap_co2
-            name: CO2 Level
-          - entity: sensor.ventilation_co2_error
-            name: Current Error
           - entity: sensor.ventilation_recommended_position
-            name: Current Recommendation
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: controller_mode
-            name: Controller Mode
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: dead_zone_state
-            name: Dead Zone State
-          - entity: sensor.ventilation_co2_filtered
-            name: Filtered CO2
-          - entity: sensor.ventilation_co2_slope
-            name: CO2 Slope
-          - type: divider
-          - entity: sensor.ventilation_zap_room_model
-            name: Room Model Confidence
-          - type: attribute
-            entity: sensor.ventilation_zap_room_model
-            attribute: closed_load_estimate_ppm_min
-            name: Provisional Room Load
-          - type: attribute
-            entity: sensor.ventilation_zap_room_model
-            attribute: ventilation_gain_estimate_ppm_min_per_fraction
-            name: Provisional Ventilation Gain
-          - type: attribute
-            entity: sensor.ventilation_zap_room_model
-            attribute: tau_estimate_min
-            name: Provisional Tau
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: coefficient_source
-            name: Active Coefficient Source
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: closed_load_estimate_ppm_min
-            name: Active Room Load
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: vent_gain_estimate_ppm_min_per_fraction
-            name: Active Ventilation Gain
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: tau_estimate_min
-            name: Active Tau
-          - entity: sensor.ventilation_zap_thermal_cap
-            name: Thermal Opening Cap
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: co2_ceiling_signal
-            name: CO2 Ceiling Signal
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: co2_ceiling_position
-            name: CO2 Opening Ceiling
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: co2_ceiling_active
-            name: CO2 Ceiling Active
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: outdoor_heat_loss_risk
-            name: Outdoor Below Minimum
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: room_temperature
-            name: Room Temperature
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: room_temperature_slope_c_per_min
-            name: Room Temperature Slope
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: predicted_room_temperature_10m
-            name: Predicted Temperature 10m
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: indoor_minimum_temperature
-            name: Indoor Range Lower (Min Indoor)
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: heating_setpoint
-            name: Indoor Range Upper (TRV Setpoint)
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: computed_temperature_range_c
-            name: Computed Temperature Range
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: temperature_deficit_c
-            name: Predicted Deficit from TRV
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: predicted_temperature_headroom_c
-            name: Predicted Margin Above Minimum
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: normalized_room_factor
-            name: Normalized Room Factor
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: outdoor_minimum_temperature
-            name: Outdoor Threshold
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: normalized_outdoor_factor
-            name: Normalized Outdoor Factor
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: cooling_time_to_floor_minutes
-            name: Estimated Minutes to Indoor Minimum
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: thermal_opening_factor
-            name: Thermal Opening Factor
-          - type: attribute
-            entity: sensor.ventilation_zap_thermal_cap
-            attribute: thermal_limit_reason
-            name: Thermal Binding Deviation
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: equilibrium_opening
-            name: Equilibrium Opening
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: integral_term
-            name: Integral Term
-          - type: attribute
-            entity: sensor.ventilation_recommended_position
-            attribute: raw_controller_output
-            name: Raw Controller Output
-          - type: divider
+            name: Window Recommendation
           - entity: cover.ventilation_zap_group
-            name: Window Group State
-          - type: attribute
-            entity: cover.ventilation_zap_group
-            attribute: current_position
-            name: Actual Actuator Position
-          - entity: input_datetime.ventilation_last_adjustment
-            name: Last Adjustment Time
-          - entity: cover.drivent_zap_left_driventokonnyi_privod
-            name: Zap Left Window
-          - entity: cover.drivent_zap_back_driventokonnyi_privod
-            name: Zap Back Window
-          - type: divider
-          - entity: binary_sensor.drivent_zap_left_datchik_peregruzki
-            name: Overload Left
-          - entity: binary_sensor.drivent_zap_back_datchik_peregruzki
-            name: Overload Back
-          - entity: sensor.drivent_zap_left_datchik_dozhdia
-            name: Rain Sensor
-
-      - type: entities
-        title: Zap Limits and Environment
-        show_header_toggle: false
-        state_color: true
-        view_layout:
-          position: sidebar
-        entities:
-          - entity: input_boolean.ventilation_use_indoor_temperature
-            name: Use Indoor Temperature Safety
-          - entity: sensor.ventilation_zap_safety_temperature
-            name: Selected Safety Temperature
-          - type: attribute
-            entity: sensor.ventilation_zap_safety_temperature
-            attribute: source
-            name: Selected Temperature Source
-          - type: attribute
-            entity: sensor.ventilation_zap_safety_temperature
-            attribute: fallback_active
-            name: Temperature Fallback Active
-          - entity: sensor.sensor_zap_temperature
-            name: Primary Room Temperature
-          - entity: sensor.radiator_left_zap_local_temperature
-            name: Radiator Valve Temperature
-          - type: attribute
-            entity: weather.forecast_home_assistant
-            attribute: temperature
-            name: Outdoor Temperature
-          - entity: input_number.ventilation_min_indoor_temp
-            name: Min Indoor Temperature
-          - entity: input_number.ventilation_min_outdoor_temp
-            name: Min Outdoor Temperature
+            name: Window Group
           - entity: input_number.ventilation_target_co2
             name: Target CO2
           - entity: input_number.ventilation_min_position
             name: Min Position
           - entity: input_number.ventilation_max_position
             name: Max Position
+          - entity: climate.radiator_left_zap
+            name: Heating Setpoint
+          - entity: input_boolean.ventilation_use_indoor_temperature
+            name: Use Indoor Temperature
+          - entity: input_number.ventilation_min_indoor_temp
+            name: Min Indoor Temperature
+          - entity: input_number.ventilation_min_outdoor_temp
+            name: Min Outdoor Temperature
 
   - title: Eva
     type: sidebar
@@ -462,33 +247,6 @@ views:
             connectgaps: true
             showlegend: true
 
-          - entity: sensor.ventilation_eva_co2_error
-            name: Error
-            yaxis: y2
-            filters:
-              - sliding_window_moving_average:
-                  window_size: 2
-                  relative_to_visible: true
-              - fn: |-
-                  ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
-                    if (nums.length > 0) {
-                      vars.err_min = Math.min(...nums);
-                      vars.err_max = Math.max(...nums);
-                    } else {
-                      vars.err_min = -100;
-                      vars.err_max = 100;
-                    }
-                    return null;
-                  }
-            line:
-              color: '#F44336'
-              width: 1
-              shape: spline
-              smoothing: 1
-            connectgaps: true
-            showlegend: true
-
           - entity: cover.drivent_eva_driventokonnyi_privod
             attribute: current_position
             name: Window
@@ -503,6 +261,17 @@ views:
         layout:
           height: 600
           shapes:
+            - type: rect
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex (parseFloat(hass.states['input_number.ventilation_eva_target_co2']?.state) || 650) - (parseFloat(hass.states['input_number.ventilation_eva_deadband_ppm']?.state) || 50)
+              y1: $ex (parseFloat(hass.states['input_number.ventilation_eva_target_co2']?.state) || 650) + (parseFloat(hass.states['input_number.ventilation_eva_deadband_ppm']?.state) || 50)
+              fillcolor: rgba(255, 152, 0, 0.08)
+              line:
+                width: 0
+              layer: below
             - type: line
               xref: paper
               x0: 0
@@ -514,17 +283,6 @@ views:
                 color: '#FF9800'
                 width: 2
                 dash: dot
-            - type: line
-              xref: paper
-              x0: 0
-              x1: 1
-              yref: y2
-              y0: 0
-              y1: 0
-              line:
-                color: '#ffffff'
-                width: 1
-                dash: dash
           xaxis:
             rangeselector:
               "y": 1.1
@@ -555,23 +313,10 @@ views:
                 const target = parseFloat(hass.states['input_number.ventilation_eva_target_co2']?.state) || 650;
                 const cMin = vars.co2_min ?? target;
                 const cMax = vars.co2_max ?? target;
-                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), 30);
+                const deadband = parseFloat(hass.states['input_number.ventilation_eva_deadband_ppm']?.state) || 50;
+                const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), deadband, 30);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
-              }
-          yaxis2:
-            title: Error (ppm)
-            side: right
-            overlaying: "y"
-            showgrid: false
-            fixedrange: true
-            range: |-
-              $fn ({vars}) => {
-                const eMin = vars.err_min ?? -100;
-                const eMax = vars.err_max ?? 100;
-                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
-                const padded = maxErr * 1.15;
-                return [-padded, padded];
               }
           yaxis3:
             visible: false
@@ -645,65 +390,16 @@ views:
             needle: true
 
       - type: entities
-        title: Eva Diagnostics
+        title: Eva Controls
         show_header_toggle: false
         state_color: true
         view_layout:
           position: sidebar
         entities:
-          - entity: sensor.sensor_eva_co2
-            name: CO2 Level
-          - entity: sensor.ventilation_eva_co2_error
-            name: Current Error
           - entity: sensor.ventilation_eva_recommended_position
-            name: Current Recommendation
-          - type: attribute
-            entity: sensor.ventilation_eva_recommended_position
-            attribute: controller_mode
-            name: Controller Mode
-          - type: attribute
-            entity: sensor.ventilation_eva_recommended_position
-            attribute: dead_zone_state
-            name: Dead Zone State
-          - entity: sensor.ventilation_eva_co2_filtered
-            name: Filtered CO2
-          - entity: sensor.ventilation_eva_co2_slope
-            name: CO2 Slope
-          - type: attribute
-            entity: sensor.ventilation_eva_recommended_position
-            attribute: equilibrium_opening
-            name: Equilibrium Opening
-          - type: attribute
-            entity: sensor.ventilation_eva_recommended_position
-            attribute: integral_term
-            name: Integral Term
-          - type: attribute
-            entity: sensor.ventilation_eva_recommended_position
-            attribute: raw_controller_output
-            name: Raw Controller Output
-          - type: divider
+            name: Window Recommendation
           - entity: cover.drivent_eva_driventokonnyi_privod
-            name: Window State
-          - type: attribute
-            entity: cover.drivent_eva_driventokonnyi_privod
-            attribute: current_position
-            name: Actual Actuator Position
-          - entity: input_datetime.ventilation_eva_last_adjustment
-            name: Last Adjustment Time
-          - entity: binary_sensor.drivent_eva_datchik_peregruzki
-            name: Overload Sensor
-
-      - type: entities
-        title: Eva Limits and Environment
-        show_header_toggle: false
-        state_color: true
-        view_layout:
-          position: sidebar
-        entities:
-          - type: attribute
-            entity: weather.forecast_home_assistant
-            attribute: temperature
-            name: Outdoor Temp
+            name: Window
           - entity: input_number.ventilation_eva_target_co2
             name: Target CO2
           - entity: input_number.ventilation_eva_min_position
@@ -711,4 +407,4 @@ views:
           - entity: input_number.ventilation_eva_max_position
             name: Max Position
           - entity: input_number.ventilation_eva_min_outdoor_temp
-            name: Min Outdoor Temp
+            name: Min Outdoor Temperature
