@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.2.0 selectable temperature safety и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.3.0 comfort-margin temperature safety, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
 
 ## архитектурные инварианты
 
@@ -66,10 +66,12 @@ control law:
 - `equilibrium_opening` выводится из room load и ventilation gain;
 - `Kp` и `Ti` автоматически выводятся из gain и tau;
 - integral умножается на фактический `dt`;
-- при первом переходе на generation 3, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
-- anti-windup удерживает integral на min/max и на thermal cap;
+- при первом переходе на generation 4, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
+- anti-windup удерживает integral на min/max, low-CO₂ ceiling и thermal cap;
 - forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
-- final recommendation ограничивается room-local min/max.
+- `co2_guard = max(filtered_CO₂, forecast_CO₂)`;
+- при `co2_guard <= target - deadband` CO₂ ceiling равен `min_position`, при `co2_guard >= target + deadband` — `max_position`, между границами применяется smoothstep;
+- final recommendation равна минимуму PI demand, low-CO₂ ceiling и thermal cap.
 
 ## temperature protection ZAP
 
@@ -87,14 +89,19 @@ thermal supervisor каждую минуту:
 
 1. обновляет сглаженный room temperature slope с реальным `dt`;
 2. вычисляет `predicted_room_temperature_10m`;
-3. сравнивает прогноз с heating setpoint;
-4. формирует continuous `temperature_cap`.
+3. сравнивает прогноз с heating setpoint и пользовательским indoor hard floor;
+4. считает outdoor heat-loss risk активным, когда наружный источник холоднее комнаты либо недоступен;
+5. формирует continuous `temperature_cap` по квадрату оставшейся comfort margin.
 
-в диапазоне дефицита от 0 до 5°C quadratic cap плавно уменьшается от `max_position` к `min_position`: малый дефицит даёт небольшое призакрытие, а сильное охлаждение усиливает ограничение.
+`comfort_margin = clamp((predicted_temperature - indoor_floor) / max(heating_setpoint - indoor_floor, 1°C), 0, 1)`
 
-`final_recommendation = min(co2_demand, temperature_cap)`
+`temperature_cap = min_position + (max_position - min_position) × comfort_margin²`
 
-`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. `temperature_deficit_c` остаётся signed diagnostic. При недоступной room temperature или setpoint sensor сохраняет numeric cap=`max_position` с явной inactive-причиной; существующие outdoor temperature, overload и CO₂-unavailable safety automations продолжают действовать.
+если прогноз не ниже setpoint или снаружи не холоднее комнаты, thermal cap равен `max_position`.
+
+`final_recommendation = min(co2_demand, co2_ceiling, temperature_cap)`
+
+`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. Полное закрытие выполняет отдельный hard-safety слой при selected temperature на пороге или ниже. `temperature_deficit_c` остаётся signed diagnostic. При недоступной room temperature или setpoint sensor сохраняет numeric cap=`max_position` с явной inactive-причиной; существующие temperature-source, overload и CO₂-unavailable safety automations продолжают действовать.
 
 ## actuator layer
 
@@ -118,7 +125,7 @@ fixed steps и дополнительные CO₂ conditions в actuator layer �
 
 `sensor.ventilation_zap_safety_temperature` публикует выбранное значение, source, threshold и fallback state. Если ни один разрешённый источник недоступен, automation закрывает окна fail-safe.
 
-обычное управление блокируется, а safety automation закрывает окна при selected temperature ниже соответствующего порога, overload любого ZAP actuator или недоступности `sensor.sensor_zap_co2` более двух минут.
+обычное управление блокируется, а safety automation закрывает окна при selected temperature на соответствующем пороге или ниже, overload любого ZAP actuator или недоступности `sensor.sensor_zap_co2` более двух минут.
 
 в режиме `off` thermal cap отключён и защита температуры выполняется только по наружному hard threshold. В режиме `on` thermal cap использует ту же primary/fallback indoor chain; при смене source temperature slope сбрасывается без ложного скачка.
 

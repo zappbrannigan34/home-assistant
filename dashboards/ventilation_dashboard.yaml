@@ -161,7 +161,7 @@ views:
         disable_pinch_to_zoom: true
 
       - type: grid
-        columns: 3
+        columns: 2
         square: false
         view_layout:
           position: sidebar
@@ -211,6 +211,22 @@ views:
                 color: '#f4b400'
               - from: 80
                 color: '#db4437'
+            needle: true
+
+          - type: gauge
+            entity: sensor.sensor_zap_temperature
+            name: Room Temperature
+            min: 10
+            max: 30
+            segments:
+              - from: 10
+                color: '#db4437'
+              - from: 18
+                color: '#ff9800'
+              - from: 20
+                color: '#f4b400'
+              - from: 22
+                color: '#43a047'
             needle: true
 
       - type: entities
@@ -271,6 +287,22 @@ views:
             name: Active Tau
           - entity: sensor.ventilation_zap_thermal_cap
             name: Thermal Opening Cap
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: co2_ceiling_signal
+            name: CO2 Ceiling Signal
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: co2_ceiling_position
+            name: CO2 Opening Ceiling
+          - type: attribute
+            entity: sensor.ventilation_recommended_position
+            attribute: co2_ceiling_active
+            name: CO2 Ceiling Active
+          - type: attribute
+            entity: sensor.ventilation_zap_thermal_cap
+            attribute: outdoor_heat_loss_risk
+            name: Outdoor Heat Loss Risk
           - type: attribute
             entity: sensor.ventilation_zap_thermal_cap
             attribute: room_temperature
