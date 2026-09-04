@@ -31,6 +31,33 @@ views:
             connectgaps: true
             showlegend: true
 
+          - entity: sensor.ventilation_co2_error
+            name: Error
+            yaxis: y2
+            filters:
+              - sliding_window_moving_average:
+                  window_size: 2
+                  relative_to_visible: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.err_min = Math.min(...nums);
+                      vars.err_max = Math.max(...nums);
+                    } else {
+                      vars.err_min = -100;
+                      vars.err_max = 100;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#F44336'
+              width: 1
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
           - entity: cover.ventilation_zap_group
             attribute: current_position
             name: Window
@@ -67,6 +94,17 @@ views:
                 color: '#FF9800'
                 width: 2
                 dash: dot
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y2
+              y0: 0
+              y1: 0
+              line:
+                color: '#ffffff'
+                width: 1
+                dash: dash
           xaxis:
             rangeselector:
               "y": 1.1
@@ -101,6 +139,20 @@ views:
                 const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), deadband, 30);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
+              }
+          yaxis2:
+            title: Error (ppm)
+            side: right
+            overlaying: "y"
+            showgrid: false
+            fixedrange: true
+            range: |-
+              $fn ({vars}) => {
+                const eMin = vars.err_min ?? -100;
+                const eMax = vars.err_max ?? 100;
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
+                const padded = maxErr * 1.15;
+                return [-padded, padded];
               }
           yaxis3:
             visible: false
@@ -247,6 +299,33 @@ views:
             connectgaps: true
             showlegend: true
 
+          - entity: sensor.ventilation_eva_co2_error
+            name: Error
+            yaxis: y2
+            filters:
+              - sliding_window_moving_average:
+                  window_size: 2
+                  relative_to_visible: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.err_min = Math.min(...nums);
+                      vars.err_max = Math.max(...nums);
+                    } else {
+                      vars.err_min = -100;
+                      vars.err_max = 100;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#F44336'
+              width: 1
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
           - entity: cover.drivent_eva_driventokonnyi_privod
             attribute: current_position
             name: Window
@@ -283,6 +362,17 @@ views:
                 color: '#FF9800'
                 width: 2
                 dash: dot
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y2
+              y0: 0
+              y1: 0
+              line:
+                color: '#ffffff'
+                width: 1
+                dash: dash
           xaxis:
             rangeselector:
               "y": 1.1
@@ -317,6 +407,20 @@ views:
                 const maxDev = Math.max(Math.abs(cMax - target), Math.abs(cMin - target), deadband, 30);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
+              }
+          yaxis2:
+            title: Error (ppm)
+            side: right
+            overlaying: "y"
+            showgrid: false
+            fixedrange: true
+            range: |-
+              $fn ({vars}) => {
+                const eMin = vars.err_min ?? -100;
+                const eMax = vars.err_max ?? 100;
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 10);
+                const padded = maxErr * 1.15;
+                return [-padded, padded];
               }
           yaxis3:
             visible: false
