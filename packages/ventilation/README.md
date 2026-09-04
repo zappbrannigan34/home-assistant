@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.4.0 setpoint-tracking temperature regulation, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
+пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.5.0 indoor/outdoor temperature ranges, signed cooling trend, low-CO₂ ceiling и cycle-identified PI controller применяются только к `zap`; EVA остаётся на существующем control law.
 
 ## архитектурные инварианты
 
@@ -66,7 +66,7 @@ control law:
 - `equilibrium_opening` выводится из room load и ventilation gain;
 - `Kp` и `Ti` автоматически выводятся из gain и tau;
 - integral умножается на фактический `dt`;
-- при первом переходе на generation 5, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
+- при первом переходе на generation 6, при изменении target/min/max и при принятии новых room-model coefficients используется bumpless tracking;
 - anti-windup удерживает integral на min/max, low-CO₂ ceiling и thermal cap;
 - forecast assist ограничен 5% room-local диапазона, а не прежними 20%;
 - `co2_guard = max(filtered_CO₂, forecast_CO₂)`;
@@ -79,37 +79,47 @@ control law:
 
 `sensor.sensor_zap_temperature`
 
-heating setpoint:
+fallback room temperature:
 
-`state_attr('climate.radiator_left_zap', 'temperature')`
+`sensor.radiator_left_zap_local_temperature`
 
-`climate.radiator_back_zap` не является обязательным входом: на момент реализации entity была `unavailable`.
+radiator setpoint `state_attr('climate.radiator_left_zap', 'temperature')` остаётся только диагностикой и не участвует в temperature cap.
 
 thermal supervisor каждую минуту:
 
-1. обновляет сглаженный room temperature slope с реальным `dt`;
-2. вычисляет `predicted_room_temperature_10m`;
-3. сравнивает прогноз непосредственно с heating setpoint;
-4. считает outdoor heat-loss risk активным, когда наружный источник холоднее комнаты либо недоступен;
-5. формирует continuous `temperature_cap` по прогнозному запасу выше setpoint.
+1. обновляет сглаженный signed room temperature slope с фактическим `dt`;
+2. вычисляет `predicted_room_temperature_10m = room + slope × 10`;
+3. переводит прогноз в indoor range между `min_indoor` и `min_indoor + 2°C`;
+4. переводит outdoor в range между `min_outdoor − 6°C` и `min_outdoor`;
+5. при отрицательном slope считает `time_to_floor` и нормирует его на 360 минут;
+6. выбирает самый строгий из трёх range factors и квадратично переводит его в opening cap.
 
-`headroom = predicted_temperature - heating_setpoint`
+`room_phase = clamp((predicted_temperature_10m - min_indoor) / 2°C, 0, 1)`
 
-`phase = clamp(headroom / 2°C, 0, 1)`
+`outdoor_phase = clamp(1 + (outdoor_temperature - min_outdoor) / 6°C, 0, 1)`
 
-`temperature_cap = min_position + (max_position - min_position) × smoothstep(phase)`
+`time_to_floor = (room_temperature - min_indoor) / -slope`, только при `slope < -0.0005°C/min`
+
+`time_phase = clamp(time_to_floor / 360 min, 0, 1)`; при стабильной или растущей температуре `time_phase=1`
+
+`opening_phase = min(room_phase, outdoor_phase, time_phase)`
+
+`temperature_cap = min_position + (max_position - min_position) × opening_phase²`
 
 следствия:
 
-- при прогнозе на setpoint или ниже cap равен `min_position`;
-- от setpoint до `setpoint + 2°C` cap плавно растёт;
-- только при прогнозе не менее чем на 2°C выше setpoint разрешён полный `max_position`;
-- если отопительный entity недоступен, используется последний числовой setpoint; если его ещё нет и наружный воздух холоднее комнаты, cap fail-safe равен `min_position`;
-- indoor hard floor не участвует в этой формуле и остаётся отдельной аварийной защитой.
+- положительный slope повышает прогноз и отпускает cap; отрицательный slope понижает прогноз и ограничивает окно раньше;
+- при прогнозе `>= min_indoor + 2°C`, outdoor `>= min_outdoor` и отсутствии угрозы достичь floor в ближайшие 6 часов cap равен `max_position`;
+- при outdoor от `min_outdoor` до `min_outdoor−6°C` разрешённое открытие плавно уменьшается; ниже нижней границы остаётся `min_position`;
+- при прогнозе внутри indoor range cap плавно уменьшается; на `min_indoor` остаётся `min_position`;
+- если outdoor недоступен, outdoor phase fail-safe равен нулю;
+- hard-safety full close остаётся отдельным слоем и не смешивается с soft cap.
+
+обязательный sanity case для настроек `min_indoor=22°C`, `min_outdoor=18°C`: при room около `26.5°C`, положительном slope, прогнозе около `26.6°C` и outdoor `21°C` все три phases равны единице, поэтому `temperature_cap=max_position`.
 
 `final_recommendation = min(co2_demand, co2_ceiling, temperature_cap)`
 
-`min_position` остаётся ventilation floor, поэтому thermal supervisor сам не закрывает окно полностью. Полное закрытие выполняет отдельный hard-safety слой. `temperature_deficit_c` и `predicted_temperature_headroom_c` — signed diagnostics setpoint tracking.
+`min_position` остаётся ventilation floor. Diagnostics публикуют обе границы, signed slope, 10-minute forecast, time-to-floor, три phases и фактически binding range.
 
 ## actuator layer
 
