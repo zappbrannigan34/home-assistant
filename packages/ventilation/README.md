@@ -1,6 +1,6 @@
 # управление вентиляцией по CO₂ — Drivent V2
 
-пакет управляет вентиляцией комнат `zap` и `eva`. В версии 2.6.0 computed TRV-to-Min-Indoor range, signed room forecast, normalized outdoor deviation, low-CO₂ ceiling и persistent UI helpers применяются только к `zap`; EVA сохраняет прежний control law.
+пакет управляет вентиляцией комнат `zap` и `eva` по **единой общей логике**: вся математика модели комнаты (`model_generation: 3`), защитной температуры, thermal cap, PI-регулятора (`controller_generation: 8`) и ворот актуатора вынесена в `custom_templates/ventilation.jinja`, исполнительные действия — в общие скрипты `script.ventilation_*`, а для каждой комнаты на дашборде задаются только её собственные уставки (`input_number` / `input_boolean`).
 
 ## архитектурные инварианты
 
@@ -73,26 +73,17 @@ control law:
 - при `co2_guard <= target - deadband` CO₂ ceiling равен `min_position`, при `co2_guard >= target + deadband` — `max_position`, между границами применяется smoothstep;
 - final recommendation равна минимуму PI demand, low-CO₂ ceiling и thermal cap.
 
-## temperature protection ZAP
+## temperature protection
 
-основная room temperature:
-
-`sensor.sensor_zap_temperature`
-
-fallback room temperature:
-
-`sensor.radiator_left_zap_local_temperature`
-
-radiator setpoint `state_attr('climate.radiator_left_zap', 'temperature')` является верхней границей вычисляемого comfort range. При временной недоступности entity используется last-known-good числовое значение.
+основная room temperature — `sensor.sensor_<room>_temperature` (без привязки к термоголовкам радиаторов).
 
 thermal supervisor каждую минуту:
 
 1. обновляет сглаженный signed room temperature slope с фактическим `dt`;
 2. вычисляет `predicted_room_temperature_10m = room + slope × 10`;
-3. вычисляет `temperature_range = TRV_setpoint − min_indoor`;
-4. нормирует положение прогноза внутри этого диапазона;
-5. нормирует outdoor deficit ниже `min_outdoor` на тот же вычисленный диапазон;
-6. выбирает меньший normalized factor и линейно переводит его в opening cap.
+3. нормирует положение прогноза в окне `+2.0 °C` над `min_indoor` (`soft_span = 2.0 °C`);
+4. нормирует outdoor deficit ниже `min_outdoor` на тот же `soft_span = 2.0 °C`;
+5. выбирает меньший normalized factor и линейно переводит его в opening cap (`min_position .. max_position`).
 
 `temperature_range = TRV_setpoint - min_indoor`
 
@@ -184,4 +175,4 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 
 **Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
-**Version:** 2.2.0
+**Version:** 3.1.0

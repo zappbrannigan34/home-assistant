@@ -1,0 +1,588 @@
+{%- set ROOMS = {
+  'zap': {
+    'label': 'Zap',
+    'co2_raw': 'sensor.sensor_zap_co2',
+    'co2_filtered': 'sensor.ventilation_co2_filtered',
+    'co2_slope': 'sensor.ventilation_co2_slope',
+    'forecast_co2': 'sensor.ventilation_forecast_co2_30m',
+    'forecast_error': 'sensor.ventilation_forecast_error_30m',
+    'room_model': 'sensor.ventilation_zap_room_model',
+    'safety_temp': 'sensor.ventilation_zap_safety_temperature',
+    'thermal_cap': 'sensor.ventilation_zap_thermal_cap',
+    'recommended': 'sensor.ventilation_recommended_position',
+    'primary_temp': 'sensor.sensor_zap_temperature',
+    'weather': 'weather.forecast_home_assistant',
+    'cover': 'cover.ventilation_zap_group',
+    'overloads': [
+      'binary_sensor.drivent_zap_left_datchik_peregruzki',
+      'binary_sensor.drivent_zap_back_datchik_peregruzki'
+    ],
+    'target_co2': 'input_number.ventilation_target_co2',
+    'min_pos': 'input_number.ventilation_min_position',
+    'max_pos': 'input_number.ventilation_max_position',
+    'deadband': 'input_number.ventilation_deadband_ppm',
+    'use_indoor_temp': 'input_boolean.ventilation_use_indoor_temperature',
+    'min_indoor_temp': 'input_number.ventilation_min_indoor_temp',
+    'min_outdoor_temp': 'input_number.ventilation_min_outdoor_temp',
+    'last_adjustment': 'input_datetime.ventilation_last_adjustment'
+  },
+  'eva': {
+    'label': 'Eva',
+    'co2_raw': 'sensor.sensor_eva_co2',
+    'co2_filtered': 'sensor.ventilation_eva_co2_filtered',
+    'co2_slope': 'sensor.ventilation_eva_co2_slope',
+    'forecast_co2': 'sensor.ventilation_eva_forecast_co2_30m',
+    'forecast_error': 'sensor.ventilation_eva_forecast_error_30m',
+    'room_model': 'sensor.ventilation_eva_room_model',
+    'safety_temp': 'sensor.ventilation_eva_safety_temperature',
+    'thermal_cap': 'sensor.ventilation_eva_thermal_cap',
+    'recommended': 'sensor.ventilation_eva_recommended_position',
+    'primary_temp': 'sensor.sensor_eva_temperature',
+    'weather': 'weather.forecast_home_assistant',
+    'cover': 'cover.drivent_eva_driventokonnyi_privod',
+    'overloads': [
+      'binary_sensor.drivent_eva_datchik_peregruzki'
+    ],
+    'target_co2': 'input_number.ventilation_eva_target_co2',
+    'min_pos': 'input_number.ventilation_eva_min_position',
+    'max_pos': 'input_number.ventilation_eva_max_position',
+    'deadband': 'input_number.ventilation_eva_deadband_ppm',
+    'use_indoor_temp': 'input_boolean.ventilation_eva_use_indoor_temperature',
+    'min_indoor_temp': 'input_number.ventilation_eva_min_indoor_temp',
+    'min_outdoor_temp': 'input_number.ventilation_eva_min_outdoor_temp',
+    'last_adjustment': 'input_datetime.ventilation_eva_last_adjustment'
+  }
+} -%}
+
+{%- macro calc_co2_trend(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
+  {%- set slope = states(cfg.co2_slope) | float(0) -%}
+  {%- set thr = 0.5 -%}
+  {%- set st = 'rising' if slope > thr else ('falling' if slope < -thr else 'stable') -%}
+  {{- {
+    'available': avail,
+    'state': st,
+    'attributes': {
+      'current_co2': states(cfg.co2_raw) | float(0),
+      'co2_filtered': states(cfg.co2_filtered) | float(0),
+      'co2_slope_ppm_min': slope,
+      'trend_threshold_ppm_min': thr,
+      'filter_type': 'ema_lowpass'
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_room_model(room, prev_attrs, trig_id) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set p = prev_attrs if (prev_attrs is mapping) else {} -%}
+  {%- set reset_gen = (p.get('model_generation') | int(0)) != 3 -%}
+  {%- set is_cycle = (trig_id | string) == 'cycle_end' -%}
+  {%- set min_pos = states(cfg.min_pos) | float(0) -%}
+  {%- set max_pos = states(cfg.max_pos) | float(80) -%}
+  {%- set target = states(cfg.target_co2) | float(650) -%}
+  {%- set applied = state_attr(cfg.cover, 'current_position') | float(0) -%}
+  {%- set phys_fraction = [[applied / 100.0, 0.0] | max, 1.0] | min -%}
+  {%- set slope = states(cfg.co2_slope) | float(0) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(target) -%}
+  {%- set error = filtered - target -%}
+  {%- set last_ts = as_timestamp(states(cfg.last_adjustment)) | float(0) -%}
+  {%- set since_move = as_timestamp(now()) - last_ts -%}
+  {%- set stable = since_move >= 900 -%}
+  {%- set prev_target = p.get('last_target') | float(target) -%}
+  {%- set ns_ov = namespace(ok=true) -%}
+  {%- for ov in cfg.overloads -%}
+    {%- if not is_state(ov, 'off') -%}
+      {%- set ns_ov.ok = false -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set overloads_off = ns_ov.ok -%}
+  {%- set slope_ok = has_value(cfg.co2_slope) -%}
+
+  {%- set prev_load = 2.1 if reset_gen else (p.get('closed_load_estimate_ppm_min') | float(2.1)) -%}
+  {%- set l_count = 0 if reset_gen else (p.get('load_sample_count') | int(0)) -%}
+  {%- set prev_acc_gain = 35.0 if reset_gen else (p.get('accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(35.0)) -%}
+  {%- set raw_load = slope + prev_acc_gain * phys_fraction -%}
+  {%- set l_elig = (not reset_gen) and is_cycle and stable and prev_target == target and phys_fraction <= 0.25 and slope_ok and overloads_off -%}
+  {%- set l_acc = l_elig and raw_load >= 0.2 and raw_load <= 15.0 and (l_count < 3 or (raw_load <= [prev_load * 3.0, 1.5] | max and raw_load >= [prev_load / 3.0, 0.2] | max)) -%}
+  {%- set l_w = [l_count, 9] | min -%}
+  {%- set new_load = (((prev_load * l_w + raw_load) / (l_w + 1)) if l_acc else prev_load) | round(3) -%}
+  {%- set new_l_count = ([l_count + (1 if l_acc else 0), 10000] | min) | int -%}
+
+  {%- set prev_gain = 35.0 if reset_gen else (p.get('ventilation_gain_estimate_ppm_min_per_fraction') | float(35.0)) -%}
+  {%- set g_count = 0 if reset_gen else (p.get('gain_sample_count') | int(0)) -%}
+  {%- set acc_load = 2.1 if reset_gen else (p.get('accepted_closed_load_estimate_ppm_min') | float(2.1)) -%}
+  {%- set raw_gain = ((acc_load - slope) / phys_fraction) if phys_fraction >= 0.04 else prev_gain -%}
+  {%- set g_elig = (not reset_gen) and is_cycle and stable and prev_target == target and phys_fraction >= 0.04 and raw_gain >= 5.0 and raw_gain <= 100.0 and slope_ok and overloads_off -%}
+  {%- set g_acc = g_elig and (g_count < 3 or (raw_gain <= prev_gain * 3.0 and raw_gain >= prev_gain / 3.0)) -%}
+  {%- set g_w = [g_count, 9] | min -%}
+  {%- set new_gain = (((prev_gain * g_w + raw_gain) / (g_w + 1)) if g_acc else prev_gain) | round(3) -%}
+  {%- set new_g_count = ([g_count + (1 if g_acc else 0), 10000] | min) | int -%}
+
+  {%- set prev_tau = 30.0 if reset_gen else (p.get('tau_estimate_min') | float(30.0)) -%}
+  {%- set t_count = 0 if reset_gen else (p.get('tau_sample_count') | int(0)) -%}
+  {%- set t_elig = (not reset_gen) and is_cycle and since_move >= 900 and since_move <= 3600 and prev_target == target and error * slope < 0 and (error | abs) >= 25 and (slope | abs) >= 0.25 and slope_ok -%}
+  {%- set raw_tau = ((error | abs) / ([slope | abs, 0.25] | max)) if t_elig else prev_tau -%}
+  {%- set tau_sample = [[raw_tau, 10.0] | max, 60.0] | min -%}
+  {%- set t_acc = t_elig and (t_count < 3 or (tau_sample <= prev_tau * 2.5 and tau_sample >= prev_tau / 2.5)) -%}
+  {%- set t_w = [t_count, 9] | min -%}
+  {%- set new_tau = (((prev_tau * t_w + tau_sample) / (t_w + 1)) if t_acc else prev_tau) | round(2) -%}
+  {%- set new_t_count = ([t_count + (1 if t_acc else 0), 10000] | min) | int -%}
+
+  {%- set prev_acc_gen = 0 if reset_gen else (p.get('accepted_model_generation') | int(0)) -%}
+  {%- set prev_acc_total = 0 if reset_gen else (p.get('accepted_total_sample_count') | int(0)) -%}
+  {%- set new_total = new_l_count + new_g_count + new_t_count -%}
+  {%- set promote = (not reset_gen) and is_cycle and new_l_count >= 4 and new_g_count >= 6 and new_t_count >= 4 and new_total > prev_acc_total -%}
+  {%- set out_acc_load = new_load if promote else acc_load -%}
+  {%- set out_acc_gain = new_gain if promote else prev_acc_gain -%}
+  {%- set prev_acc_tau = 30.0 if reset_gen else (p.get('accepted_tau_estimate_min') | float(30.0)) -%}
+  {%- set out_acc_tau = new_tau if promote else prev_acc_tau -%}
+  {%- set out_acc_gen = (prev_acc_gen + 1) if promote else prev_acc_gen -%}
+  {%- set out_acc_total = new_total if promote else prev_acc_total -%}
+  {%- set conf = (([new_l_count / 4, new_g_count / 6, new_t_count / 4, 1] | min) * 100) | round(0) | int -%}
+  {%- set st = 0 if reset_gen else conf -%}
+  {{- {
+    'state': st,
+    'attributes': {
+      'model_generation': 3,
+      'model_state': 'ready' if (not reset_gen and new_l_count >= 4 and new_g_count >= 6 and new_t_count >= 4) else 'learning',
+      'closed_load_estimate_ppm_min': new_load,
+      'ventilation_gain_estimate_ppm_min_per_fraction': new_gain,
+      'tau_estimate_min': new_tau,
+      'accepted_closed_load_estimate_ppm_min': out_acc_load,
+      'accepted_ventilation_gain_estimate_ppm_min_per_fraction': out_acc_gain,
+      'accepted_tau_estimate_min': out_acc_tau,
+      'accepted_model_generation': out_acc_gen,
+      'accepted_total_sample_count': out_acc_total,
+      'coefficient_source': 'last_known_good' if out_acc_gen > 0 else 'history_bootstrap',
+      'load_sample_count': new_l_count,
+      'gain_sample_count': new_g_count,
+      'tau_sample_count': new_t_count,
+      'model_confidence_pct': st,
+      'sample_applied_position': applied if (is_cycle or p.get('sample_applied_position') is none) else p.get('sample_applied_position'),
+      'sample_slope_ppm_min': slope if (is_cycle or p.get('sample_slope_ppm_min') is none) else p.get('sample_slope_ppm_min'),
+      'last_target': target if (is_cycle or p.get('last_target') is none) else p.get('last_target'),
+      'last_min_position': min_pos if (is_cycle or p.get('last_min_position') is none) else p.get('last_min_position'),
+      'last_max_position': max_pos if (is_cycle or p.get('last_max_position') is none) else p.get('last_max_position'),
+      'last_model_update': now().isoformat() if is_cycle else (p.get('last_model_update') | default('', true))
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_safety_temp(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set indoor_mode = is_state(cfg.use_indoor_temp, 'on') -%}
+  {%- set primary_valid = has_value(cfg.primary_temp) -%}
+  {%- set outdoor_raw = state_attr(cfg.weather, 'temperature') -%}
+  {%- set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) -%}
+  {%- if indoor_mode and primary_valid -%}
+    {%- set val = states(cfg.primary_temp) | float -%}
+    {%- set src = 'primary_room' -%}
+    {%- set thr = states(cfg.min_indoor_temp) | float(16) -%}
+    {%- set unsafe = val <= thr -%}
+  {%- elif outdoor_valid -%}
+    {%- set val = outdoor_raw | float -%}
+    {%- set src = 'outdoor' -%}
+    {%- set thr = states(cfg.min_outdoor_temp) | float(-10) -%}
+    {%- set unsafe = val <= thr -%}
+  {%- else -%}
+    {%- set val = none -%}
+    {%- set src = 'unavailable' -%}
+    {%- set thr = none -%}
+    {%- set unsafe = true -%}
+  {%- endif -%}
+  {{- {
+    'available': val is not none,
+    'state': val,
+    'attributes': {
+      'requested_mode': 'indoor_preferred' if indoor_mode else 'outdoor_only',
+      'source': src,
+      'selected_threshold': thr,
+      'unsafe': unsafe,
+      'fallback_active': indoor_mode and (not primary_valid),
+      'primary_room_temperature': (states(cfg.primary_temp) | float) if primary_valid else none,
+      'outdoor_temperature': (outdoor_raw | float) if outdoor_valid else none
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_thermal_cap(room, prev_attrs) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set p = prev_attrs if (prev_attrs is mapping) else {} -%}
+  {%- set min_pos = states(cfg.min_pos) | float(0) -%}
+  {%- set max_pos = states(cfg.max_pos) | float(80) -%}
+  {%- set span = [max_pos - min_pos, 0] | max -%}
+  {%- set indoor_mode = is_state(cfg.use_indoor_temp, 'on') -%}
+  {%- set room_source = state_attr(cfg.safety_temp, 'source') | default('unavailable', true) -%}
+  {%- set room_valid = indoor_mode and room_source == 'primary_room' and has_value(cfg.safety_temp) -%}
+  {%- set indoor_floor = states(cfg.min_indoor_temp) | float(16) -%}
+  {%- set outdoor_floor = states(cfg.min_outdoor_temp) | float(-10) -%}
+  {%- set soft_span = 2.0 -%}
+  {%- set soft_upper = (indoor_floor + soft_span) | round(2) -%}
+  {%- set outdoor_raw = state_attr(cfg.weather, 'temperature') -%}
+  {%- set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) -%}
+  {%- set now_ts = as_timestamp(now()) -%}
+  {%- set prev_ts = p.get('last_update_ts') | float(now_ts - 60) -%}
+  {%- set dt = [[(now_ts - prev_ts) / 60.0, 0.5] | max, 2.0] | min -%}
+  {%- set prev_slope = p.get('room_temperature_slope_c_per_min') | float(0) -%}
+  {%- set prev_source = p.get('room_temperature_source') | default('', true) -%}
+
+  {%- if not room_valid -%}
+    {%- set cap = max_pos | round(1) -%}
+    {%- set room_temp = none -%}
+    {%- set out_source = 'inactive' -%}
+    {%- set slope = prev_slope | round(4) -%}
+    {%- set predicted = none -%}
+    {%- set prev_room_out = p.get('previous_room_temperature') | float(0) -%}
+    {%- set headroom = none -%}
+    {%- set r_factor = 0.0 -%}
+    {%- set o_factor = 0.0 -%}
+    {%- set cool_min = none -%}
+  {%- else -%}
+    {%- set room_temp = states(cfg.safety_temp) | float -%}
+    {%- set out_source = room_source -%}
+    {%- set src_changed = prev_source != room_source -%}
+    {%- set prev_room = room_temp if src_changed else (p.get('previous_room_temperature') | float(room_temp)) -%}
+    {%- set base_slope = 0.0 if src_changed else prev_slope -%}
+    {%- set sample = (room_temp - prev_room) / dt -%}
+    {%- set alpha = [dt / 5.0, 1.0] | min -%}
+    {%- set slope = (0.0 if src_changed else (base_slope + alpha * (sample - base_slope))) | round(4) -%}
+    {%- set predicted = (room_temp + slope * 10.0) | round(2) -%}
+    {%- set prev_room_out = room_temp -%}
+    {%- set headroom = (predicted - indoor_floor) | round(2) -%}
+    {%- set r_factor = ([[(predicted - indoor_floor) / soft_span, 0.0] | max, 1.0] | min) | round(4) -%}
+    {%- set o_def = [outdoor_floor - (outdoor_raw | float), 0.0] | max if outdoor_valid else soft_span -%}
+    {%- set o_factor = ([[1.0 - o_def / soft_span, 0.0] | max, 1.0] | min) | round(4) -%}
+    {%- set op_factor = [r_factor, o_factor] | min -%}
+    {%- set cap = (min_pos + span * op_factor) | round(1) -%}
+    {%- set cool_min = ([((room_temp - indoor_floor) / (0.0 - slope)), 0.0] | max | round(1)) if slope < -0.0005 else none -%}
+  {%- endif -%}
+
+  {%- set op_factor_out = ([r_factor, o_factor] | min) | round(4) -%}
+  {%- set limit_active = room_valid and (cap < max_pos - 0.1) -%}
+  {%- if not indoor_mode -%}
+    {%- set reason = 'inactive_external_only_mode' -%}
+  {%- elif room_source != 'primary_room' -%}
+    {%- set reason = 'inactive_internal_temperature_unavailable' -%}
+  {%- elif cap >= max_pos - 0.1 -%}
+    {%- set reason = 'inactive_at_computed_range_top' -%}
+  {%- elif not outdoor_valid -%}
+    {%- set reason = 'outdoor_unavailable_fail_safe' -%}
+  {%- elif o_factor <= r_factor -%}
+    {%- set reason = 'outdoor_deviation_inside_computed_range' -%}
+  {%- else -%}
+    {%- set reason = 'predicted_room_deviation_inside_computed_range' -%}
+  {%- endif -%}
+
+  {{- {
+    'state': cap,
+    'attributes': {
+      'room_temperature': room_temp,
+      'room_temperature_source': out_source,
+      'soft_upper_temperature': soft_upper,
+      'soft_temperature_span_c': soft_span,
+      'room_temperature_slope_c_per_min': slope,
+      'predicted_room_temperature_10m': predicted,
+      'indoor_minimum_temperature': indoor_floor,
+      'outdoor_minimum_temperature': outdoor_floor,
+      'predicted_temperature_headroom_c': headroom,
+      'normalized_room_factor': r_factor,
+      'normalized_outdoor_factor': o_factor,
+      'cooling_time_to_floor_minutes': cool_min,
+      'thermal_opening_factor': op_factor_out,
+      'outdoor_heat_loss_risk': (not outdoor_valid) or ((outdoor_raw | float) < outdoor_floor),
+      'thermal_limit_active': limit_active,
+      'thermal_limit_reason': reason,
+      'minimum_ventilation_position': min_pos,
+      'outdoor_temperature': (outdoor_raw | float) if outdoor_valid else 0.0,
+      'previous_room_temperature': prev_room_out,
+      'last_update_ts': now_ts
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_forecast_co2(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
+  {%- set raw_co2 = states(cfg.co2_raw) | float(650) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(raw_co2) -%}
+  {%- set slope = states(cfg.co2_slope) | float(0) -%}
+  {{- {
+    'available': avail,
+    'state': (filtered + slope * 10.0) | round(1),
+    'attributes': {
+      'raw_co2': raw_co2,
+      'filtered_co2': filtered,
+      'slope_ppm_min': slope,
+      'forecast_horizon_min': 10
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_forecast_error(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set avail = has_value(cfg.forecast_co2) -%}
+  {%- set forecast = states(cfg.forecast_co2) | float(650) -%}
+  {%- set target = states(cfg.target_co2) | float(650) -%}
+  {{- {
+    'available': avail,
+    'state': (forecast - target) | round(0) | int,
+    'attributes': {
+      'forecast_co2_30m': forecast,
+      'target': target,
+      'deadband_ppm': states(cfg.deadband) | float(50)
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_co2_error(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set avail = has_value(cfg.co2_filtered) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(0) -%}
+  {%- set target = states(cfg.target_co2) | float(650) -%}
+  {{- {
+    'available': avail,
+    'state': (filtered - target) | round(0) | int,
+    'attributes': {
+      'raw_co2': states(cfg.co2_raw) | float(0),
+      'filtered_co2': filtered,
+      'forecast_co2_30m': states(cfg.forecast_co2) | float(0),
+      'forecast_error_10m': states(cfg.forecast_error) | float(0),
+      'error_source': 'filtered_co2_error'
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro calc_recommended(room, prev_attrs) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set p = prev_attrs if (prev_attrs is mapping) else {} -%}
+  {%- set prev_gen = p.get('controller_generation') | int(0) -%}
+  {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) and has_value(cfg.forecast_error) -%}
+  {%- set raw_co2 = states(cfg.co2_raw) | float(650) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(raw_co2) -%}
+  {%- set slope = states(cfg.co2_slope) | float(0) -%}
+  {%- set forecast_co2 = states(cfg.forecast_co2) | float(filtered) -%}
+  {%- set forecast_error = states(cfg.forecast_error) | float(0) -%}
+  {%- set min_pos = states(cfg.min_pos) | float(0) -%}
+  {%- set max_pos = states(cfg.max_pos) | float(80) -%}
+  {%- set target = states(cfg.target_co2) | float(650) -%}
+  {%- set deadband = states(cfg.deadband) | float(50) -%}
+  {%- set span = [max_pos - min_pos, 0] | max -%}
+  {%- set error = filtered - target -%}
+  {%- set error_outside = 0.0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1.0 if error > 0 else -1.0) -%}
+
+  {%- set model_v3 = (state_attr(cfg.room_model, 'model_generation') | int(0)) >= 3 -%}
+  {%- set load = (state_attr(cfg.room_model, 'accepted_closed_load_estimate_ppm_min') | float(2.1)) if model_v3 else 2.1 -%}
+  {%- set gain = (state_attr(cfg.room_model, 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(35.0)) if model_v3 else 35.0 -%}
+  {%- set tau = (state_attr(cfg.room_model, 'accepted_tau_estimate_min') | float(30.0)) if model_v3 else 30.0 -%}
+
+  {%- set equilibrium_phys = 100.0 * (load / ([gain, 5.0] | max)) -%}
+  {%- set equilibrium = [[equilibrium_phys, min_pos] | max, max_pos] | min -%}
+  {%- set kp = [[80.0 / ([gain * tau, 250.0] | max), 0.03] | max, 0.25] | min -%}
+  {%- set ti = [[tau * 1.5, 20.0] | max, 90.0] | min -%}
+  {%- set ki = kp / ti -%}
+  {%- set assist = [[(10.0 * (forecast_co2 - filtered)) / ([gain, 5.0] | max), 0.0 - 0.05 * span] | max, 0.05 * span] | min -%}
+
+  {%- set co2_guard = [filtered, forecast_co2] | max -%}
+  {%- set low_co2 = target - deadband -%}
+  {%- set high_co2 = target + deadband -%}
+  {%- set co2_phase = [[[(co2_guard - low_co2) / ([high_co2 - low_co2, 1.0] | max), 0.0] | max, 1.0] | min, 0.0] | max -%}
+  {%- set co2_ceiling = min_pos + span * co2_phase * co2_phase * (3.0 - 2.0 * co2_phase) -%}
+  {%- set thermal_cap = states(cfg.thermal_cap) | float(max_pos) if has_value(cfg.thermal_cap) else max_pos -%}
+  {%- set upper = [[([thermal_cap, co2_ceiling] | min), min_pos] | max, max_pos] | min -%}
+
+  {%- set prev_integral = 0.0 if prev_gen != 8 else (p.get('integral_term') | float(0.0)) -%}
+  {%- set prev_ts = p.get('last_update_ts') | float(as_timestamp(now()) - 60) -%}
+  {%- set dt = [[(as_timestamp(now()) - prev_ts) / 60.0, 0.0] | max, 2.0] | min -%}
+  {%- set curr_model_gen = (state_attr(cfg.room_model, 'accepted_model_generation') | int(0)) if model_v3 else 0 -%}
+  {%- set model_promoted = (prev_gen == 8) and (curr_model_gen != (p.get('accepted_model_generation') | int(0))) -%}
+  {%- set settings_changed = (prev_gen == 8) and ((p.get('previous_target') | float(target)) != target or (p.get('previous_min_position') | float(min_pos)) != min_pos or (p.get('previous_max_position') | float(max_pos)) != max_pos) -%}
+  {%- set without_integral = equilibrium + kp * error_outside + assist -%}
+  {%- set prev_co2_demand = p.get('co2_recommendation_before_thermal') | float(equilibrium) -%}
+
+  {%- if prev_gen != 8 -%}
+    {%- set integral = 0.0 -%}
+  {%- elif model_promoted or settings_changed -%}
+    {%- set integral = ([[prev_co2_demand, min_pos] | max, max_pos] | min - without_integral) if error_outside > 0 else ([prev_integral, 0.0] | max if error > 0 else prev_integral) -%}
+  {%- elif error_outside == 0 -%}
+    {%- set integral = (prev_integral * 0.90) if ((error > 5 and prev_integral < 0) or (error < -5 and prev_integral > 0)) else prev_integral -%}
+  {%- elif error_outside > 0 -%}
+    {%- set integral = prev_integral if (without_integral + prev_integral >= upper) else (prev_integral + ki * error_outside * dt) -%}
+  {%- else -%}
+    {%- if upper <= min_pos + 0.05 -%}
+      {%- set integral = [prev_integral + ki * error_outside * dt, 0.0] | max if prev_integral > 0 else prev_integral -%}
+    {%- elif without_integral + prev_integral <= min_pos -%}
+      {%- set integral = prev_integral -%}
+    {%- else -%}
+      {%- set integral = prev_integral + ki * error_outside * dt -%}
+    {%- endif -%}
+  {%- endif -%}
+
+  {%- set integral_limit = [[span * 0.50, 1.0] | max, 15.0] | min -%}
+  {%- set integral = [[integral, 0.0 - integral_limit] | max, integral_limit] | min -%}
+  {%- set raw_output = without_integral + integral -%}
+  {%- set co2_demand = [[raw_output, min_pos] | max, max_pos] | min -%}
+  {%- set recommended = [co2_demand, upper] | min -%}
+
+  {%- if raw_output < min_pos - 0.1 -%}
+    {%- set mode = 'minimum_saturation' -%}
+  {%- elif co2_ceiling <= thermal_cap and co2_ceiling < max_pos - 0.1 and raw_output > co2_ceiling + 0.1 -%}
+    {%- set mode = 'low_co2_ceiling' -%}
+  {%- elif thermal_cap < co2_ceiling and thermal_cap < max_pos - 0.1 and raw_output > thermal_cap + 0.1 -%}
+    {%- set mode = 'thermal_limited' -%}
+  {%- elif error > deadband -%}
+    {%- set mode = 'opening_to_reduce_co2' -%}
+  {%- elif error < (0.0 - deadband) -%}
+    {%- set mode = 'closing_on_low_co2' -%}
+  {%- else -%}
+    {%- set mode = 'holding_equilibrium' -%}
+  {%- endif -%}
+
+  {%- if prev_gen != 8 -%}
+    {%- set aw_state = 'bumpless_tracking' -%}
+  {%- elif raw_output >= upper and error_outside > 0 -%}
+    {%- set aw_state = 'low_co2_ceiling_hold' if co2_ceiling <= thermal_cap else 'thermal_cap_hold' -%}
+  {%- elif upper <= min_pos + 0.05 and error_outside < 0 -%}
+    {%- set aw_state = 'low_co2_ceiling_hold' -%}
+  {%- elif raw_output <= min_pos and error_outside < 0 -%}
+    {%- set aw_state = 'minimum_saturation_hold' -%}
+  {%- elif (error | abs) <= deadband -%}
+    {%- set aw_state = 'equilibrium_hold' -%}
+  {%- else -%}
+    {%- set aw_state = 'active_integrating' -%}
+  {%- endif -%}
+
+  {{- {
+    'available': avail,
+    'state': recommended | round(1),
+    'attributes': {
+      'raw_co2': raw_co2,
+      'filtered_co2': filtered,
+      'slope_ppm_min': slope,
+      'forecast_co2_30m': forecast_co2,
+      'forecast_error_30m': forecast_error,
+      'target': target,
+      'min_position': min_pos | int(0),
+      'max_position': max_pos | int(80),
+      'deadband_ppm': deadband,
+      'controller_generation': 8,
+      'controller_family': 'room_pi_physical_fraction_dual_ceiling_indoor_margin',
+      'current_applied_position': state_attr(cfg.cover, 'current_position') | float(0),
+      'room_model_confidence_pct': states(cfg.room_model) | float(0),
+      'room_model_state': state_attr(cfg.room_model, 'model_state') | default('learning', true),
+      'thermal_cap_position': thermal_cap,
+      'thermal_limit_active': state_attr(cfg.thermal_cap, 'thermal_limit_active') | default(false, true),
+      'co2_ceiling_signal': co2_guard | round(1),
+      'co2_ceiling_position': co2_ceiling | round(2),
+      'co2_ceiling_active': co2_guard < high_co2,
+      'room_temperature': state_attr(cfg.thermal_cap, 'room_temperature') | float(0),
+      'soft_upper_temperature': state_attr(cfg.thermal_cap, 'soft_upper_temperature') | float(0),
+      'soft_temperature_span_c': state_attr(cfg.thermal_cap, 'soft_temperature_span_c') | float(2.0),
+      'indoor_minimum_temperature': state_attr(cfg.thermal_cap, 'indoor_minimum_temperature') | float(0),
+      'outdoor_minimum_temperature': state_attr(cfg.thermal_cap, 'outdoor_minimum_temperature') | float(0),
+      'room_temperature_slope_c_per_min': state_attr(cfg.thermal_cap, 'room_temperature_slope_c_per_min') | float(0),
+      'predicted_room_temperature_10m': state_attr(cfg.thermal_cap, 'predicted_room_temperature_10m') | float(0),
+      'predicted_temperature_headroom_c': state_attr(cfg.thermal_cap, 'predicted_temperature_headroom_c') | float(0),
+      'normalized_room_factor': state_attr(cfg.thermal_cap, 'normalized_room_factor') | float(0),
+      'normalized_outdoor_factor': state_attr(cfg.thermal_cap, 'normalized_outdoor_factor') | float(0),
+      'cooling_time_to_floor_minutes': state_attr(cfg.thermal_cap, 'cooling_time_to_floor_minutes'),
+      'thermal_opening_factor': state_attr(cfg.thermal_cap, 'thermal_opening_factor') | float(0),
+      'thermal_limit_reason': state_attr(cfg.thermal_cap, 'thermal_limit_reason') | default('unknown', true),
+      'last_update_ts': as_timestamp(now()),
+      'previous_target': target,
+      'previous_min_position': min_pos,
+      'previous_max_position': max_pos,
+      'closed_load_estimate_ppm_min': load,
+      'vent_gain_estimate_ppm_min_per_fraction': gain,
+      'tau_estimate_min': tau,
+      'coefficient_source': (state_attr(cfg.room_model, 'coefficient_source') | default('history_bootstrap', true)) if model_v3 else 'history_bootstrap',
+      'accepted_model_generation': curr_model_gen,
+      'kp_auto_pct_per_ppm': kp | round(4),
+      'ti_auto_min': ti | round(2),
+      'ki_auto_pct_per_ppm_min': ki | round(6),
+      'equilibrium_opening': equilibrium | round(2),
+      'forecast_assist_pct': assist | round(2),
+      'integral_term': integral | round(4),
+      'raw_controller_output': raw_output | round(2),
+      'co2_recommendation_before_thermal': co2_demand | round(2),
+      'controller_mode': mode,
+      'dead_zone_state': 'inside_dead_zone' if (error | abs) <= deadband else 'outside_dead_zone',
+      'anti_windup_state': aw_state,
+      'error_outside_deadband_ppm': error_outside | round(1)
+    }
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro eval_control_gate(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set rec_valid = has_value(cfg.recommended) -%}
+  {%- set rec = (states(cfg.recommended) | float(-1) | round(0) | int(-1)) if rec_valid else -1 -%}
+  {%- set cur = state_attr(cfg.cover, 'current_position') | float(0) | round(0) | int(0) -%}
+  {%- set pos_changed = rec_valid and rec >= 0 and rec != cur -%}
+  {%- set last_ts = as_timestamp(states(cfg.last_adjustment)) | float(0) -%}
+  {%- set cooldown_ok = (as_timestamp(now()) - last_ts) >= 1800 -%}
+  {%- set ns_ov = namespace(ok=true) -%}
+  {%- for ov in cfg.overloads -%}
+    {%- if not is_state(ov, 'off') -%}
+      {%- set ns_ov.ok = false -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set co2_ok = has_value(cfg.co2_raw) -%}
+  {%- set t_val = states(cfg.safety_temp) -%}
+  {%- set t_thr = state_attr(cfg.safety_temp, 'selected_threshold') -%}
+  {%- set temp_ok = is_number(t_val) and t_thr is not none and (t_val | float) > (t_thr | float) -%}
+  {{- {
+    'allowed': pos_changed and cooldown_ok and ns_ov.ok and co2_ok and temp_ok,
+    'recommended': rec,
+    'current': cur,
+    'cover': cfg.cover,
+    'last_adjustment': cfg.last_adjustment
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro eval_safety_close(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set t_val = states(cfg.safety_temp) -%}
+  {%- set t_thr = state_attr(cfg.safety_temp, 'selected_threshold') -%}
+  {%- set t_src = state_attr(cfg.safety_temp, 'source') | default('unavailable', true) -%}
+  {%- set temp_unsafe = (not is_number(t_val)) or (t_thr is none) or ((t_val | float) <= (t_thr | float)) -%}
+  {%- set ns_ov = namespace(any_on=false) -%}
+  {%- for ov in cfg.overloads -%}
+    {%- if is_state(ov, 'on') -%}
+      {%- set ns_ov.any_on = true -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set co2_lost = is_state(cfg.co2_raw, 'unavailable') -%}
+  {%- set cover_open = (state_attr(cfg.cover, 'current_position') | int(0)) > 0 -%}
+  {%- if ns_ov.any_on -%}
+    {%- set reason = 'overload' -%}
+  {%- elif co2_lost -%}
+    {%- set reason = 'co2_sensor_lost' -%}
+  {%- elif t_src == 'primary_room' -%}
+    {%- set reason = 'cold_indoor_primary' -%}
+  {%- elif t_src == 'outdoor' -%}
+    {%- set reason = 'cold_outdoor' -%}
+  {%- else -%}
+    {%- set reason = 'temperature_sources_unavailable' -%}
+  {%- endif -%}
+  {{- {
+    'temp_unsafe': temp_unsafe,
+    'should_close': cover_open and (temp_unsafe or ns_ov.any_on or co2_lost),
+    'reason': reason,
+    'label': cfg.label,
+    'cover': cfg.cover,
+    'last_adjustment': cfg.last_adjustment,
+    'selected_temp': t_val,
+    'source': t_src,
+    'threshold': t_thr
+  } | to_json -}}
+{%- endmacro -%}
+
+{%- macro get_device_error_info(room) -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {{- {
+    'label': cfg.label,
+    'co2': states(cfg.co2_raw),
+    'position': state_attr(cfg.cover, 'current_position')
+  } | to_json -}}
+{%- endmacro -%}

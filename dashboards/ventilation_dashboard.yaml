@@ -210,7 +210,7 @@ views:
           - type: gauge
             entity: cover.ventilation_zap_group
             attribute: current_position
-            name: Window Group
+            name: Window
             unit: "%"
             min: 0
             max: 100
@@ -251,15 +251,13 @@ views:
           - entity: sensor.ventilation_recommended_position
             name: Window Recommendation
           - entity: cover.ventilation_zap_group
-            name: Window Group
+            name: Window
           - entity: input_number.ventilation_target_co2
             name: Target CO2
           - entity: input_number.ventilation_min_position
             name: Min Position
           - entity: input_number.ventilation_max_position
             name: Max Position
-          - entity: climate.radiator_left_zap
-            name: Heating Setpoint
           - entity: input_boolean.ventilation_use_indoor_temperature
             name: Use Indoor Temperature
           - entity: input_number.ventilation_min_indoor_temp
@@ -441,7 +439,7 @@ views:
         disable_pinch_to_zoom: true
 
       - type: grid
-        columns: 3
+        columns: 2
         square: false
         view_layout:
           position: sidebar
@@ -493,6 +491,22 @@ views:
                 color: '#db4437'
             needle: true
 
+          - type: gauge
+            entity: sensor.sensor_eva_temperature
+            name: Room Temperature
+            min: 10
+            max: 30
+            segments:
+              - from: 10
+                color: '#db4437'
+              - from: 18
+                color: '#ff9800'
+              - from: 20
+                color: '#f4b400'
+              - from: 22
+                color: '#43a047'
+            needle: true
+
       - type: entities
         title: Eva Controls
         show_header_toggle: false
@@ -510,5 +524,9 @@ views:
             name: Min Position
           - entity: input_number.ventilation_eva_max_position
             name: Max Position
+          - entity: input_boolean.ventilation_eva_use_indoor_temperature
+            name: Use Indoor Temperature
+          - entity: input_number.ventilation_eva_min_indoor_temp
+            name: Min Indoor Temperature
           - entity: input_number.ventilation_eva_min_outdoor_temp
             name: Min Outdoor Temperature

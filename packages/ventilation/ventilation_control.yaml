@@ -1,23 +1,14 @@
 # package: ventilation_multiroom
-# Version: 2.6.0
-# Last Updated: 2026-09-04
-# Description: ZAP computed TRV-to-indoor range with signed forecast and persistent helpers; EVA law unchanged
-#
-# АЛГОРИТМ: Отдельный room-local PI-style controller для каждой комнаты.
-# Controller layer считает demand непрерывно по filtered CO2 error,
-# а actuator layer отдельно применяет это demand не чаще одного раза в 30 минут.
-# Коэффициенты не задаются руками — они оцениваются из наблюдаемой динамики комнаты.
-#
-# РЕСУРС ПРИВОДА: WindowMaster рейтинг ~10 000 циклов.
-# С длинным тренд-фильтром: реальных движений заметно меньше, чем при коротком шумном контуре.
-# Drivent V2 магнитный датчик надёжнее V1 — реальный ресурс выше.
+# Version: 3.1.0
+# Last Updated: 2026-11-22
+# Description: Unified room-agnostic ventilation engine (custom_templates/ventilation.jinja + shared scripts) for ZAP & EVA, without radiator coupling
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  INPUT NUMBERS (настройки регулирования)
+#  INPUT NUMBERS (настройки регулирования по комнатам, без initial:)
 # ──────────────────────────────────────────────────────────────────────────────
 
 input_number:
-  # Zap room (legacy/default entity names stay attached here for compatibility)
+  # Zap
   ventilation_target_co2:
     name: "Ventilation Target CO2"
     min: 300
@@ -48,7 +39,7 @@ input_number:
   ventilation_min_outdoor_temp:
     name: "Ventilation Min Outdoor Temp"
     min: -30
-    max: 10
+    max: 20
     step: 1
     unit_of_measurement: "°C"
     icon: mdi:thermometer-alert
@@ -72,6 +63,7 @@ input_number:
     icon: mdi:arrow-left-right
     mode: box
 
+  # Eva
   ventilation_eva_target_co2:
     name: "Ventilation Eva Target CO2"
     min: 300
@@ -102,10 +94,19 @@ input_number:
   ventilation_eva_min_outdoor_temp:
     name: "Ventilation Eva Min Outdoor Temp"
     min: -30
-    max: 10
+    max: 20
     step: 1
     unit_of_measurement: "°C"
     icon: mdi:thermometer-alert
+    mode: box
+
+  ventilation_eva_min_indoor_temp:
+    name: "Ventilation Eva Min Indoor Temp"
+    min: 10
+    max: 25
+    step: 0.5
+    unit_of_measurement: "°C"
+    icon: mdi:home-thermometer
     mode: box
 
   ventilation_eva_deadband_ppm:
@@ -120,6 +121,10 @@ input_number:
 input_boolean:
   ventilation_use_indoor_temperature:
     name: "Ventilation Use Indoor Temperature"
+    icon: mdi:home-thermometer-outline
+
+  ventilation_eva_use_indoor_temperature:
+    name: "Ventilation Eva Use Indoor Temperature"
     icon: mdi:home-thermometer-outline
 
 input_datetime:
@@ -148,7 +153,7 @@ cover:
       - cover.drivent_zap_back_driventokonnyi_privod
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  STATISTICS SENSORS (сглаживание и длинный тренд CO2)
+#  STATISTICS / FILTER / DERIVATIVE SENSORS
 # ──────────────────────────────────────────────────────────────────────────────
 
 sensor:
@@ -231,13 +236,11 @@ sensor:
     time_window: "00:15:00"
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  TEMPLATE SENSORS
+#  TEMPLATE SENSORS (общие макросы из custom_templates/ventilation.jinja)
 # ──────────────────────────────────────────────────────────────────────────────
 
 template:
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 1: ДОЛГИЙ ТРЕНД CO2 (30-минутное изменение + сглаженное среднее)
-  # ════════════════════════════════════════════════════════════════════════════
+  # ══ ZAP ═════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
@@ -252,29 +255,18 @@ template:
         unique_id: ventilation_co2_trend
         icon: mdi:trending-up
         availability: >
-          {{ has_value('sensor.sensor_zap_co2') and
-             has_value('sensor.ventilation_co2_filtered') and
-             has_value('sensor.ventilation_co2_slope') }}
+          {% from 'ventilation.jinja' import calc_co2_trend %}
+          {{ (calc_co2_trend('zap') | from_json).available }}
         state: >
-          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-          {% set trend_threshold = 0.5 %}
-          {% if slope > trend_threshold %}
-            rising
-          {% elif slope < -trend_threshold %}
-            falling
-          {% else %}
-            stable
-          {% endif %}
+          {% from 'ventilation.jinja' import calc_co2_trend %}
+          {{ (calc_co2_trend('zap') | from_json).state }}
         attributes:
-          current_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          co2_filtered: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
-          co2_slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
+          current_co2: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('zap') | from_json).attributes.current_co2 }}"
+          co2_filtered: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('zap') | from_json).attributes.co2_filtered }}"
+          co2_slope_ppm_min: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('zap') | from_json).attributes.co2_slope_ppm_min }}"
           trend_threshold_ppm_min: 0.5
           filter_type: "ema_lowpass"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 2: ZAP — модель комнаты по завершённым 30-минутным циклам
-  # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
@@ -294,203 +286,33 @@ template:
         unit_of_measurement: "%"
         icon: mdi:chart-bell-curve-cumulative
         state: >
-          {% set load_count = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-          {% set gain_count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-          {% set tau_count = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-          {% set confidence = [load_count / 4, gain_count / 6, tau_count / 4, 1] | min %}
-          {{ (confidence * 100) | round(0) }}
+          {% from 'ventilation.jinja' import calc_room_model %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}
+          {{ (calc_room_model('zap', p, tid) | from_json).state }}
         attributes:
-          model_generation: 2
-          model_state: >
-            {% set load_count = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set gain_count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set tau_count = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {{ 'ready' if load_count >= 4 and gain_count >= 6 and tau_count >= 4 else 'learning' }}
-          closed_load_estimate_ppm_min: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 1] | max %}
-            {% set applied = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
-            {% set fraction = [[(applied - min_pos) / span, 0] | max, 1] | min %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set stable = (as_timestamp(now()) - last_ts) >= 900 %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(states('input_number.ventilation_target_co2') | float(650)) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set previous_min = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') | float(min_pos) %}
-            {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
-            {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
-            {% set eligible = trigger.id == 'cycle_end' and stable and settings_same and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set previous_gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set raw_sample = slope + previous_gain * fraction %}
-            {% set sample = [[raw_sample, 0] | max, 20] | min %}
-            {% set accepted = eligible and raw_sample >= 0 and raw_sample <= 20 and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
-            {% set weight = [count, 9] | min %}
-            {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(3) }}
-          ventilation_gain_estimate_ppm_min_per_fraction: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 1] | max %}
-            {% set applied = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
-            {% set fraction = [[(applied - min_pos) / span, 0] | max, 1] | min %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set stable = (as_timestamp(now()) - last_ts) >= 900 %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(states('input_number.ventilation_target_co2') | float(650)) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set previous_min = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') | float(min_pos) %}
-            {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
-            {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
-            {% set raw_sample = ((load - slope) / fraction) if fraction >= 0.15 else previous %}
-            {% set sample = [[raw_sample, 0.05] | max, 100] | min %}
-            {% set eligible = trigger.id == 'cycle_end' and stable and settings_same and fraction >= 0.15 and raw_sample > 0.05 and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set accepted = eligible and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0.05] | max)) %}
-            {% set weight = [count, 9] | min %}
-            {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(3) }}
-          tau_estimate_min: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(650) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set stable = (as_timestamp(now()) - last_ts) >= 900 %}
-            {% set raw_sample = ((error | abs) / ([slope | abs, 0.05] | max)) if error * slope < 0 and (error | abs) >= 25 else previous %}
-            {% set sample = [[raw_sample, 6] | max, 180] | min %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(target) %}
-            {% set eligible = trigger.id == 'cycle_end' and stable and previous_target == target and error * slope < 0 and (error | abs) >= 25 and has_value('sensor.ventilation_co2_slope') %}
-            {% set accepted = eligible and (count < 3 or (sample <= previous * 4 and sample >= previous / 4)) %}
-            {% set weight = [count, 9] | min %}
-            {{ (((previous * weight + sample) / (weight + 1)) if accepted else previous) | round(2) }}
-          accepted_closed_load_estimate_ppm_min: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set total = l + g + t %}
-            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
-            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
-            {{ state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(previous) if promote else previous }}
-          accepted_ventilation_gain_estimate_ppm_min_per_fraction: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set total = l + g + t %}
-            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
-            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
-            {{ state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(previous) if promote else previous }}
-          accepted_tau_estimate_min: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
-            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set total = l + g + t %}
-            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
-            {% set promote = trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total %}
-            {{ state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(previous) if promote else previous }}
-          accepted_model_generation: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) %}
-            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set total = l + g + t %}
-            {% set accepted_total = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
-            {{ previous + 1 if trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > accepted_total else previous }}
-          accepted_total_sample_count: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'accepted_total_sample_count') | int(0) %}
-            {% set l = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set g = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set t = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set total = l + g + t %}
-            {{ total if trigger.id == 'cycle_end' and l >= 4 and g >= 6 and t >= 4 and total > previous else previous }}
-          coefficient_source: >
-            {{ 'last_known_good' if state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) > 0 else 'history_bootstrap' }}
-          load_sample_count: >
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'load_sample_count') | int(0) %}
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 1] | max %}
-            {% set applied = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
-            {% set fraction = [[(applied - min_pos) / span, 0] | max, 1] | min %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set previous_gain = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set raw_sample = slope + previous_gain * fraction %}
-            {% set sample = [[raw_sample, 0] | max, 20] | min %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(states('input_number.ventilation_target_co2') | float(650)) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set previous_min = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') | float(min_pos) %}
-            {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
-            {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
-            {% set eligible = trigger.id == 'cycle_end' and (as_timestamp(now()) - last_ts) >= 900 and settings_same and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set accepted = eligible and raw_sample >= 0 and raw_sample <= 20 and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0] | max)) %}
-            {{ ([count + (1 if accepted else 0), 10000] | min) | int }}
-          gain_sample_count: >
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'gain_sample_count') | int(0) %}
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'ventilation_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 1] | max %}
-            {% set applied = state_attr('cover.ventilation_zap_group', 'current_position') | float(min_pos) %}
-            {% set fraction = [[(applied - min_pos) / span, 0] | max, 1] | min %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set raw_sample = ((load - slope) / fraction) if fraction >= 0.15 else previous %}
-            {% set sample = [[raw_sample, 0.05] | max, 100] | min %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(states('input_number.ventilation_target_co2') | float(650)) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set previous_min = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') | float(min_pos) %}
-            {% set previous_max = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') | float(max_pos) %}
-            {% set settings_same = previous_target == target and previous_min == min_pos and previous_max == max_pos %}
-            {% set eligible = trigger.id == 'cycle_end' and (as_timestamp(now()) - last_ts) >= 900 and settings_same and fraction >= 0.15 and raw_sample > 0.05 and has_value('sensor.ventilation_co2_slope') and is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') %}
-            {% set accepted = eligible and (count < 3 or (sample <= [previous * 4, 1] | max and sample >= [previous / 4, 0.05] | max)) %}
-            {{ ([count + (1 if accepted else 0), 10000] | min) | int }}
-          tau_sample_count: >
-            {% set count = state_attr('sensor.ventilation_zap_room_model', 'tau_sample_count') | int(0) %}
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'tau_estimate_min') | float(25) %}
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(650) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-            {% set raw_sample = ((error | abs) / ([slope | abs, 0.05] | max)) if error * slope < 0 and (error | abs) >= 25 else previous %}
-            {% set sample = [[raw_sample, 6] | max, 180] | min %}
-            {% set last_ts = as_timestamp(states('input_datetime.ventilation_last_adjustment')) | float(0) %}
-            {% set previous_target = state_attr('sensor.ventilation_zap_room_model', 'last_target') | float(target) %}
-            {% set eligible = trigger.id == 'cycle_end' and (as_timestamp(now()) - last_ts) >= 900 and previous_target == target and error * slope < 0 and (error | abs) >= 25 and has_value('sensor.ventilation_co2_slope') %}
-            {% set accepted = eligible and (count < 3 or (sample <= previous * 4 and sample >= previous / 4)) %}
-            {{ ([count + (1 if accepted else 0), 10000] | min) | int }}
-          model_confidence_pct: "{{ states('sensor.ventilation_zap_room_model') | float(0) }}"
-          sample_applied_position: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'sample_applied_position') %}
-            {{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
-          sample_slope_ppm_min: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'sample_slope_ppm_min') %}
-            {{ states('sensor.ventilation_co2_slope') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
-          last_target: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_target') %}
-            {{ states('input_number.ventilation_target_co2') | float(650) if trigger.id == 'cycle_end' or previous is none else previous }}
-          last_min_position: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_min_position') %}
-            {{ states('input_number.ventilation_min_position') | float(0) if trigger.id == 'cycle_end' or previous is none else previous }}
-          last_max_position: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_max_position') %}
-            {{ states('input_number.ventilation_max_position') | float(80) if trigger.id == 'cycle_end' or previous is none else previous }}
-          last_model_update: >
-            {% set previous = state_attr('sensor.ventilation_zap_room_model', 'last_model_update') | default('', true) %}
-            {{ now().isoformat() if trigger.id == 'cycle_end' else previous }}
+          model_generation: 3
+          model_state: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.model_state }}"
+          closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.closed_load_estimate_ppm_min }}"
+          ventilation_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.ventilation_gain_estimate_ppm_min_per_fraction }}"
+          tau_estimate_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.tau_estimate_min }}"
+          accepted_closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.accepted_closed_load_estimate_ppm_min }}"
+          accepted_ventilation_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.accepted_ventilation_gain_estimate_ppm_min_per_fraction }}"
+          accepted_tau_estimate_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.accepted_tau_estimate_min }}"
+          accepted_model_generation: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.accepted_model_generation }}"
+          accepted_total_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.accepted_total_sample_count }}"
+          coefficient_source: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.coefficient_source }}"
+          load_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.load_sample_count }}"
+          gain_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.gain_sample_count }}"
+          tau_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.tau_sample_count }}"
+          model_confidence_pct: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.model_confidence_pct }}"
+          sample_applied_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.sample_applied_position }}"
+          sample_slope_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.sample_slope_ppm_min }}"
+          last_target: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_target }}"
+          last_min_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_min_position }}"
+          last_max_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_max_position }}"
+          last_model_update: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_model_update }}"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 3: ZAP — выбранная температура для hard safety
-  # ════════════════════════════════════════════════════════════════════════════
   - sensor:
       - name: "Ventilation ZAP Safety Temperature"
         unique_id: ventilation_zap_safety_temperature
@@ -499,75 +321,17 @@ template:
         state_class: measurement
         icon: mdi:shield-thermometer
         state: >
-          {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-          {% set primary_valid = has_value('sensor.sensor_zap_temperature') %}
-          {% set valve_valid = has_value('sensor.radiator_left_zap_local_temperature') %}
-          {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
-          {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
-          {% if indoor_mode and primary_valid %}
-            {{ states('sensor.sensor_zap_temperature') | float }}
-          {% elif indoor_mode and valve_valid %}
-            {{ states('sensor.radiator_left_zap_local_temperature') | float }}
-          {% elif outdoor_valid %}
-            {{ outdoor_raw | float }}
-          {% else %}
-            {{ none }}
-          {% endif %}
+          {% from 'ventilation.jinja' import calc_safety_temp %}
+          {{ (calc_safety_temp('zap') | from_json).state }}
         attributes:
-          requested_mode: >
-            {{ 'indoor_preferred' if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') else 'outdoor_only' }}
-          source: >
-            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% if indoor_mode and has_value('sensor.sensor_zap_temperature') %}
-              primary_room
-            {% elif indoor_mode and has_value('sensor.radiator_left_zap_local_temperature') %}
-              radiator_valve
-            {% elif outdoor_raw is not none and is_number(outdoor_raw) %}
-              outdoor
-            {% else %}
-              unavailable
-            {% endif %}
-          selected_threshold: >
-            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-            {% set has_indoor = has_value('sensor.sensor_zap_temperature') or has_value('sensor.radiator_left_zap_local_temperature') %}
-            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% if indoor_mode and has_indoor %}
-              {{ states('input_number.ventilation_min_indoor_temp') | float(16) }}
-            {% elif outdoor_raw is not none and is_number(outdoor_raw) %}
-              {{ states('input_number.ventilation_min_outdoor_temp') | float(-10) }}
-            {% else %}
-              {{ none }}
-            {% endif %}
-          unsafe: >
-            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-            {% set primary_valid = has_value('sensor.sensor_zap_temperature') %}
-            {% set valve_valid = has_value('sensor.radiator_left_zap_local_temperature') %}
-            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
-            {% if indoor_mode and primary_valid %}
-              {{ states('sensor.sensor_zap_temperature') | float <= states('input_number.ventilation_min_indoor_temp') | float(16) }}
-            {% elif indoor_mode and valve_valid %}
-              {{ states('sensor.radiator_left_zap_local_temperature') | float <= states('input_number.ventilation_min_indoor_temp') | float(16) }}
-            {% elif outdoor_valid %}
-              {{ outdoor_raw | float <= states('input_number.ventilation_min_outdoor_temp') | float(-10) }}
-            {% else %}
-              true
-            {% endif %}
-          fallback_active: >
-            {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-            {{ indoor_mode and not has_value('sensor.sensor_zap_temperature') }}
-          primary_room_temperature: >
-            {{ states('sensor.sensor_zap_temperature') | float if has_value('sensor.sensor_zap_temperature') else none }}
-          radiator_valve_temperature: >
-            {{ states('sensor.radiator_left_zap_local_temperature') | float if has_value('sensor.radiator_left_zap_local_temperature') else none }}
-          outdoor_temperature: >
-            {% set value = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {{ value | float if value is not none and is_number(value) else none }}
+          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.requested_mode }}"
+          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.source }}"
+          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.selected_threshold }}"
+          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.unsafe }}"
+          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.fallback_active }}"
+          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.primary_room_temperature }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.outdoor_temperature }}"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 4: ZAP — плавное ограничение открытия по температуре
-  # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
@@ -581,171 +345,31 @@ template:
         unit_of_measurement: "%"
         icon: mdi:home-thermometer-outline
         state: >
-          {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-          {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-          {% set indoor_mode = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') %}
-          {% set room_source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-          {% set room_valid = indoor_mode and room_source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-          {% if not room_valid %}
-            {{ max_pos | round(1) }}
-          {% else %}
-            {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
-            {% set indoor_floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set outdoor_floor = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-            {% set setpoint_raw = state_attr('climate.radiator_left_zap', 'temperature') %}
-            {% set live_setpoint_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and setpoint_raw is not none and is_number(setpoint_raw) %}
-            {% set previous_setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {% set setpoint_available = live_setpoint_valid or (previous_setpoint is not none and is_number(previous_setpoint)) %}
-            {% set setpoint = setpoint_raw | float if live_setpoint_valid else previous_setpoint | float if setpoint_available else indoor_floor %}
-            {% set temperature_range = setpoint - indoor_floor %}
-            {% set outdoor_raw = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set now_ts = as_timestamp(now()) %}
-            {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
-            {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
-            {% set previous_source = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_source') | default('', true) %}
-            {% set source_changed = previous_source != room_source %}
-            {% set previous_room = room if source_changed else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
-            {% set previous_slope = 0 if source_changed else state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {% set sample = (room - previous_room) / dt %}
-            {% set alpha = [dt / 5, 1] | min %}
-            {% set slope = previous_slope + alpha * (sample - previous_slope) %}
-            {% set predicted = room + slope * 10 %}
-            {% if not setpoint_available or temperature_range <= 0 %}
-              {{ min_pos | round(1) }}
-            {% else %}
-              {% set room_factor = [[[(predicted - indoor_floor) / temperature_range, 0] | max, 1] | min, 0] | max %}
-              {% set outdoor_deficit = [outdoor_floor - (outdoor_raw | float), 0] | max if outdoor_valid else temperature_range %}
-              {% set outdoor_factor = [[[(1 - outdoor_deficit / temperature_range), 0] | max, 1] | min, 0] | max %}
-              {% set opening_factor = [room_factor, outdoor_factor] | min %}
-              {{ (min_pos + span * opening_factor) | round(1) }}
-            {% endif %}
-          {% endif %}
+          {% from 'ventilation.jinja' import calc_thermal_cap %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_thermal_cap('zap', p) | from_json).state }}
         attributes:
-          room_temperature: >
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {{ states('sensor.ventilation_zap_safety_temperature') | float if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') else none }}
-          room_temperature_source: >
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {{ source if is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] else 'inactive' }}
-          heating_setpoint: >
-            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
-            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
-            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {{ live | float if live_valid else previous | float if previous is not none and is_number(previous) else none }}
-          heating_setpoint_used_for_control: true
-          room_temperature_slope_c_per_min: >
-            {% set previous_slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-            {% set previous_source = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_source') | default('', true) %}
-            {% if not room_valid %}
-              {{ previous_slope | round(4) }}
-            {% elif previous_source != source %}
-              0
-            {% else %}
-              {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
-              {% set now_ts = as_timestamp(now()) %}
-              {% set previous_ts = state_attr('sensor.ventilation_zap_thermal_cap', 'last_update_ts') | float(now_ts - 60) %}
-              {% set dt = [[(now_ts - previous_ts) / 60, 0.5] | max, 2] | min %}
-              {% set previous_room = state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(room) %}
-              {% set sample = (room - previous_room) / dt %}
-              {% set alpha = [dt / 5, 1] | min %}
-              {{ (previous_slope + alpha * (sample - previous_slope)) | round(4) }}
-            {% endif %}
-          predicted_room_temperature_10m: >
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-            {% if not room_valid %}
-              {{ none }}
-            {% else %}
-              {% set room = states('sensor.ventilation_zap_safety_temperature') | float %}
-              {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-              {{ (room + slope * 10) | round(2) }}
-            {% endif %}
-          indoor_minimum_temperature: "{{ states('input_number.ventilation_min_indoor_temp') | float(16) }}"
-          outdoor_minimum_temperature: "{{ states('input_number.ventilation_min_outdoor_temp') | float(-10) }}"
-          computed_temperature_range_c: >
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {{ ((setpoint | float) - floor) | round(2) if setpoint is not none and is_number(setpoint) and (setpoint | float) > floor else none }}
-          temperature_deficit_c: >
-            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {{ ((setpoint | float) - (predicted | float)) | round(2) if setpoint is not none and is_number(setpoint) and predicted is not none and is_number(predicted) else none }}
-          predicted_temperature_headroom_c: >
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {{ ((predicted | float) - floor) | round(2) if predicted is not none and is_number(predicted) else none }}
-          normalized_room_factor: >
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set setpoint = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {% set predicted = state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') %}
-            {% set range = (setpoint | float) - floor if setpoint is not none and is_number(setpoint) else 0 %}
-            {{ ([[[((predicted | float) - floor) / range, 0] | max, 1] | min, 0] | max) | round(4) if predicted is not none and is_number(predicted) and range > 0 else 0 }}
-          normalized_outdoor_factor: >
-            {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set threshold = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-            {% set range = state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) %}
-            {% set deficit = [threshold - (outdoor | float), 0] | max if outdoor is not none and is_number(outdoor) else range %}
-            {{ ([[[(1 - deficit / range), 0] | max, 1] | min, 0] | max) | round(4) if range > 0 else 0 }}
-          cooling_time_to_floor_minutes: >
-            {% set room = states('sensor.ventilation_zap_safety_temperature') %}
-            {% set floor = states('input_number.ventilation_min_indoor_temp') | float(16) %}
-            {% set slope = state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) %}
-            {{ ([((room | float) - floor) / (0 - slope), 0] | max) | round(1) if is_number(room) and slope < -0.0005 else none }}
-          thermal_opening_factor: >
-            {% set room_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) %}
-            {% set outdoor_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) %}
-            {{ ([room_factor, outdoor_factor] | min) | round(4) }}
-          outdoor_heat_loss_risk: >
-            {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set threshold = states('input_number.ventilation_min_outdoor_temp') | float(-10) %}
-            {{ outdoor is none or not is_number(outdoor) or outdoor | float < threshold }}
-          thermal_limit_active: >
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-            {{ room_valid and states('sensor.ventilation_zap_thermal_cap') | float(max_pos) < max_pos - 0.1 }}
-          thermal_limit_reason: >
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') %}
-            {% set range = state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) %}
-            {% set room_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) %}
-            {% set outdoor_factor = state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) %}
-            {% if is_state('input_boolean.ventilation_use_indoor_temperature', 'off') %}
-              inactive_external_only_mode
-            {% elif source not in ['primary_room', 'radiator_valve'] %}
-              inactive_internal_temperature_unavailable
-            {% elif range <= 0 %}
-              invalid_computed_temperature_range_fail_safe
-            {% elif states('sensor.ventilation_zap_thermal_cap') | float(max_pos) >= max_pos - 0.1 %}
-              inactive_at_computed_range_top
-            {% elif outdoor is none or not is_number(outdoor) %}
-              outdoor_unavailable_fail_safe
-            {% elif outdoor_factor <= room_factor %}
-              outdoor_deviation_inside_computed_range
-            {% else %}
-              predicted_room_deviation_inside_computed_range
-            {% endif %}
-          minimum_ventilation_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
-          outdoor_temperature: "{{ state_attr('weather.forecast_home_assistant', 'temperature') | float(0) }}"
-          heating_setpoint_source: >
-            {% set live = state_attr('climate.radiator_left_zap', 'temperature') %}
-            {% set live_valid = states('climate.radiator_left_zap') not in ['unknown', 'unavailable'] and live is not none and is_number(live) %}
-            {% set previous = state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') %}
-            {{ 'climate.radiator_left_zap' if live_valid else 'last_known_good' if previous is not none and is_number(previous) else 'unavailable' }}
-          previous_room_temperature: >
-            {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-            {% set room_valid = is_state('input_boolean.ventilation_use_indoor_temperature', 'on') and source in ['primary_room', 'radiator_valve'] and has_value('sensor.ventilation_zap_safety_temperature') %}
-            {{ states('sensor.ventilation_zap_safety_temperature') | float if room_valid else state_attr('sensor.ventilation_zap_thermal_cap', 'previous_room_temperature') | float(0) }}
-          last_update_ts: "{{ as_timestamp(now()) }}"
+          room_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.room_temperature }}"
+          room_temperature_source: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.room_temperature_source }}"
+          soft_upper_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.soft_upper_temperature }}"
+          soft_temperature_span_c: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.soft_temperature_span_c }}"
+          room_temperature_slope_c_per_min: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.room_temperature_slope_c_per_min }}"
+          predicted_room_temperature_10m: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.predicted_room_temperature_10m }}"
+          indoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.indoor_minimum_temperature }}"
+          outdoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.outdoor_minimum_temperature }}"
+          predicted_temperature_headroom_c: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.predicted_temperature_headroom_c }}"
+          normalized_room_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.normalized_room_factor }}"
+          normalized_outdoor_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.normalized_outdoor_factor }}"
+          cooling_time_to_floor_minutes: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.cooling_time_to_floor_minutes }}"
+          thermal_opening_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.thermal_opening_factor }}"
+          outdoor_heat_loss_risk: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.outdoor_heat_loss_risk }}"
+          thermal_limit_active: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.thermal_limit_active }}"
+          thermal_limit_reason: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.thermal_limit_reason }}"
+          minimum_ventilation_position: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.minimum_ventilation_position }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.outdoor_temperature }}"
+          previous_room_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.previous_room_temperature }}"
+          last_update_ts: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('zap', p) | from_json).attributes.last_update_ts }}"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 5: ZAP — 10m forecast + equilibrium-seeking PI-style controller
-  # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
@@ -759,18 +383,15 @@ template:
         unit_of_measurement: "ppm"
         icon: mdi:chart-timeline-variant
         availability: >
-          {{ has_value('sensor.sensor_zap_co2') and
-             has_value('sensor.ventilation_co2_filtered') and
-             has_value('sensor.ventilation_co2_slope') }}
+          {% from 'ventilation.jinja' import calc_forecast_co2 %}
+          {{ (calc_forecast_co2('zap') | from_json).available }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-          {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
-          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-          {{ (filtered + slope * 10) | round(1) }}
+          {% from 'ventilation.jinja' import calc_forecast_co2 %}
+          {{ (calc_forecast_co2('zap') | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
-          slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
+          raw_co2: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('zap') | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('zap') | from_json).attributes.filtered_co2 }}"
+          slope_ppm_min: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('zap') | from_json).attributes.slope_ppm_min }}"
           forecast_horizon_min: 10
 
       - name: "Ventilation Forecast Error 30m"
@@ -779,316 +400,82 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_forecast_co2_30m') }}
+          {% from 'ventilation.jinja' import calc_forecast_error %}
+          {{ (calc_forecast_error('zap') | from_json).available }}
         state: >
-          {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(650) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {{ (forecast - target) | round(0) }}
+          {% from 'ventilation.jinja' import calc_forecast_error %}
+          {{ (calc_forecast_error('zap') | from_json).state }}
         attributes:
-          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          deadband_ppm: 50
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('zap') | from_json).attributes.forecast_co2_30m }}"
+          target: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('zap') | from_json).attributes.target }}"
+          deadband_ppm: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('zap') | from_json).attributes.deadband_ppm }}"
 
       - name: "Ventilation Recommended Position"
         unique_id: ventilation_recommended_position
         unit_of_measurement: "%"
         icon: mdi:window-open-variant
         availability: >
-          {{ has_value('sensor.sensor_zap_co2') and
-             has_value('sensor.ventilation_co2_filtered') and
-             has_value('sensor.ventilation_co2_slope') and
-             has_value('sensor.ventilation_forecast_error_30m') }}
+          {% from 'ventilation.jinja' import calc_recommended %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_recommended('zap', p) | from_json).available }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_zap_co2') | float(650) %}
-          {% set filtered = states('sensor.ventilation_co2_filtered') | float(raw_co2) %}
-          {% set slope = states('sensor.ventilation_co2_slope') | float(0) %}
-          {% set forecast_co2 = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-          {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-          {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-          {% set span = [max_pos - min_pos, 0] | max %}
-          {% set error = filtered - target %}
-          {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-          {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(2.597) %}
-          {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-          {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(30.715) %}
-          {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(previous_load) %}
-          {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(previous_gain) %}
-          {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(previous_tau) %}
-          {% set model_changed = (load - previous_load) | abs > 0.0005 or (gain - previous_gain) | abs > 0.0005 or (tau - previous_tau) | abs > 0.0005 %}
-          {% set equilibrium_fraction = [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
-          {% set equilibrium = min_pos + span * equilibrium_fraction %}
-          {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
-          {% set kp = [[kp, 0.002] | max, 0.10] | min %}
-          {% set ti = [[tau * 2, 30] | max, 180] | min %}
-          {% set ki = kp / ti %}
-          {% set forecast_delta = forecast_co2 - filtered %}
-          {% set assist = (forecast_delta / ([gain * 10, 1] | max)) * span %}
-          {% set assist = [[assist, -0.05 * span] | max, 0.05 * span] | min %}
-          {% set co2_guard = [filtered, forecast_co2] | max %}
-          {% set low_co2 = target - deadband %}
-          {% set high_co2 = target + deadband %}
-          {% set co2_phase = [[[(co2_guard - low_co2) / ([high_co2 - low_co2, 1] | max), 0] | max, 1] | min, 0] | max %}
-          {% set co2_smooth = co2_phase * co2_phase * (3 - 2 * co2_phase) %}
-          {% set co2_ceiling = min_pos + span * co2_smooth %}
-          {% set thermal_cap = states('sensor.ventilation_zap_thermal_cap') | float(max_pos) if has_value('sensor.ventilation_zap_thermal_cap') else max_pos %}
-          {% set upper = [[([thermal_cap, co2_ceiling] | min), min_pos] | max, max_pos] | min %}
-          {% set previous_integral = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
-          {% set previous_demand = states('sensor.ventilation_recommended_position') | float(equilibrium) %}
-          {% set previous_ts = state_attr('sensor.ventilation_recommended_position', 'last_update_ts') | float(as_timestamp(now()) - 60) %}
-          {% set dt = [[(as_timestamp(now()) - previous_ts) / 60, 0] | max, 2] | min %}
-          {% set generation = state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) %}
-          {% set previous_target = state_attr('sensor.ventilation_recommended_position', 'previous_target') | float(target) %}
-          {% set previous_min = state_attr('sensor.ventilation_recommended_position', 'previous_min_position') | float(min_pos) %}
-          {% set previous_max = state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) %}
-          {% set settings_changed = previous_target != target or previous_min != min_pos or previous_max != max_pos %}
-          {% set without_integral = equilibrium + kp * error_outside + assist %}
-          {% if generation != 7 or settings_changed or model_changed or trigger.id == 'startup' %}
-            {% set integral = previous_demand - without_integral %}
-          {% elif (without_integral + previous_integral >= upper and error_outside > 0) or (without_integral + previous_integral <= min_pos and error_outside < 0) %}
-            {% set integral = previous_integral %}
-          {% else %}
-            {% set integral = previous_integral + ki * error_outside * dt %}
-          {% endif %}
-          {% set integral_limit = span * 0.25 %}
-          {% set integral = [[integral, 0 - integral_limit] | max, integral_limit] | min %}
-          {% set co2_demand = [[without_integral + integral, min_pos] | max, max_pos] | min %}
-          {% set recommended = [co2_demand, upper] | min %}
-          {{ recommended | round(1) }}
+          {% from 'ventilation.jinja' import calc_recommended %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_recommended('zap', p) | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
-          slope_ppm_min: "{{ states('sensor.ventilation_co2_slope') | float(0) }}"
-          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
-          forecast_error_30m: "{{ states('sensor.ventilation_forecast_error_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          min_position: "{{ states('input_number.ventilation_min_position') | int(0) }}"
-          max_position: "{{ states('input_number.ventilation_max_position') | int(80) }}"
-          deadband_ppm: "{{ states('input_number.ventilation_deadband_ppm') | float(50) }}"
-          controller_generation: 7
-          controller_family: room_pi_cycle_identified_dual_ceiling_computed_temperature_range
-          current_applied_position: "{{ state_attr('cover.ventilation_zap_group', 'current_position') | float(0) }}"
-          room_model_confidence_pct: "{{ states('sensor.ventilation_zap_room_model') | float(0) }}"
-          room_model_state: "{{ state_attr('sensor.ventilation_zap_room_model', 'model_state') | default('learning', true) }}"
-          thermal_cap_position: "{{ states('sensor.ventilation_zap_thermal_cap') | float(states('input_number.ventilation_max_position') | float(80)) }}"
-          thermal_limit_active: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_limit_active') | default(false, true) }}"
-          co2_ceiling_signal: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {{ ([filtered, forecast] | max) | round(1) }}
-          co2_ceiling_position: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set signal = [filtered, forecast] | max %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set phase = [[[(signal - (target - deadband)) / ([2 * deadband, 1] | max), 0] | max, 1] | min, 0] | max %}
-            {{ (min_pos + (max_pos - min_pos) * phase * phase * (3 - 2 * phase)) | round(2) }}
-          co2_ceiling_active: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {{ [filtered, forecast] | max < target + deadband }}
-          room_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature') | float(0) }}"
-          heating_setpoint: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'heating_setpoint') | float(0) }}"
-          heating_setpoint_used_for_control: true
-          indoor_minimum_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'indoor_minimum_temperature') | float(0) }}"
-          outdoor_minimum_temperature: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'outdoor_minimum_temperature') | float(0) }}"
-          computed_temperature_range_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'computed_temperature_range_c') | float(0) }}"
-          room_temperature_slope_c_per_min: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'room_temperature_slope_c_per_min') | float(0) }}"
-          predicted_room_temperature_10m: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_room_temperature_10m') | float(0) }}"
-          temperature_deficit_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'temperature_deficit_c') | float(0) }}"
-          predicted_temperature_headroom_c: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'predicted_temperature_headroom_c') | float(0) }}"
-          normalized_room_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_room_factor') | float(0) }}"
-          normalized_outdoor_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'normalized_outdoor_factor') | float(0) }}"
-          cooling_time_to_floor_minutes: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'cooling_time_to_floor_minutes') }}"
-          thermal_opening_factor: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_opening_factor') | float(0) }}"
-          thermal_limit_reason: "{{ state_attr('sensor.ventilation_zap_thermal_cap', 'thermal_limit_reason') | default('unknown', true) }}"
-          last_update_ts: "{{ as_timestamp(now()) }}"
-          previous_target: "{{ states('input_number.ventilation_target_co2') | float(650) }}"
-          previous_min_position: "{{ states('input_number.ventilation_min_position') | float(0) }}"
-          previous_max_position: "{{ states('input_number.ventilation_max_position') | float(80) }}"
-          controller_mode: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set error = filtered - target %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set signal = [filtered, forecast] | max %}
-            {% set phase = [[[(signal - (target - deadband)) / ([2 * deadband, 1] | max), 0] | max, 1] | min, 0] | max %}
-            {% set co2_ceiling = min_pos + (max_pos - min_pos) * phase * phase * (3 - 2 * phase) %}
-            {% set thermal_cap = states('sensor.ventilation_zap_thermal_cap') | float(max_pos) %}
-            {% set raw = state_attr('sensor.ventilation_recommended_position', 'raw_controller_output') | float(min_pos) %}
-            {% if raw < min_pos - 0.1 %}
-              minimum_saturation
-            {% elif co2_ceiling <= thermal_cap and co2_ceiling < max_pos - 0.1 and raw > co2_ceiling + 0.1 %}
-              low_co2_ceiling
-            {% elif thermal_cap < co2_ceiling and thermal_cap < max_pos - 0.1 and raw > thermal_cap + 0.1 %}
-              thermal_limited
-            {% elif error > deadband %}
-              opening_to_reduce_co2
-            {% elif error < (0 - deadband) %}
-              closing_on_low_co2
-            {% else %}
-              holding_equilibrium
-            {% endif %}
-          dead_zone_state: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% if ((filtered - target) | abs) <= deadband %}
-              inside_dead_zone
-            {% else %}
-              outside_dead_zone
-            {% endif %}
-          anti_windup_state: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set thermal_cap = states('sensor.ventilation_zap_thermal_cap') | float(max_pos) if has_value('sensor.ventilation_zap_thermal_cap') else max_pos %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set signal = [filtered, forecast] | max %}
-            {% set phase = [[[(signal - (target - deadband)) / ([2 * deadband, 1] | max), 0] | max, 1] | min, 0] | max %}
-            {% set co2_ceiling = min_pos + (max_pos - min_pos) * phase * phase * (3 - 2 * phase) %}
-            {% set upper = [thermal_cap, co2_ceiling] | min %}
-            {% set raw = state_attr('sensor.ventilation_recommended_position', 'raw_controller_output') | float(min_pos) %}
-            {% set error = filtered - target %}
-            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% if state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) != 7 %}
-              bumpless_tracking
-            {% elif raw >= upper and error_outside > 0 %}
-              {{ 'low_co2_ceiling_hold' if co2_ceiling <= thermal_cap else 'thermal_cap_hold' }}
-            {% elif raw <= min_pos and error_outside < 0 %}
-              minimum_saturation_hold
-            {% elif (error | abs) <= deadband %}
-              equilibrium_hold
-            {% else %}
-              active_integrating
-            {% endif %}
-          error_outside_deadband_ppm: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set error = filtered - target %}
-            {{ (0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1)) | round(1) }}
-          forecast_assist_pct: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(6.681)) %}
-            {% set assist = ((forecast - filtered) / ([gain * 10, 1] | max)) * span %}
-            {{ ([[assist, -0.05 * span] | max, 0.05 * span] | min) | round(2) }}
-          closed_load_estimate_ppm_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) }}"
-          vent_gain_estimate_ppm_min_per_fraction: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) }}"
-          tau_estimate_min: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) }}"
-          coefficient_source: "{{ state_attr('sensor.ventilation_zap_room_model', 'coefficient_source') | default('history_bootstrap', true) }}"
-          accepted_model_generation: "{{ state_attr('sensor.ventilation_zap_room_model', 'accepted_model_generation') | int(0) }}"
-          kp_auto_pct_per_ppm: >
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
-            {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
-            {{ ([[kp, 0.002] | max, 0.10] | min) | round(4) }}
-          ti_auto_min: >
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
-            {{ ([[tau * 2, 30] | max, 180] | min) | round(2) }}
-          ki_auto_pct_per_ppm_min: >
-            {% set kp = state_attr('sensor.ventilation_recommended_position', 'kp_auto_pct_per_ppm') | float(0.02) %}
-            {% set ti = state_attr('sensor.ventilation_recommended_position', 'ti_auto_min') | float(50) %}
-            {{ (kp / ti) | round(6) }}
-          equilibrium_opening: >
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-            {% set fraction = [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
-            {{ (min_pos + span * fraction) | round(2) }}
-          integral_term: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set error = filtered - target %}
-            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
-            {% set previous_load = state_attr('sensor.ventilation_recommended_position', 'closed_load_estimate_ppm_min') | float(load) %}
-            {% set previous_gain = state_attr('sensor.ventilation_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(gain) %}
-            {% set previous_tau = state_attr('sensor.ventilation_recommended_position', 'tau_estimate_min') | float(tau) %}
-            {% set model_changed = (load - previous_load) | abs > 0.0005 or (gain - previous_gain) | abs > 0.0005 or (tau - previous_tau) | abs > 0.0005 %}
-            {% set equilibrium = min_pos + span * [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
-            {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
-            {% set kp = [[kp, 0.002] | max, 0.10] | min %}
-            {% set ti = [[tau * 2, 30] | max, 180] | min %}
-            {% set ki = kp / ti %}
-            {% set assist = ((forecast - filtered) / ([gain * 10, 1] | max)) * span %}
-            {% set assist = [[assist, -0.05 * span] | max, 0.05 * span] | min %}
-            {% set co2_guard = [filtered, forecast] | max %}
-            {% set low_co2 = target - deadband %}
-            {% set high_co2 = target + deadband %}
-            {% set co2_phase = [[[(co2_guard - low_co2) / ([high_co2 - low_co2, 1] | max), 0] | max, 1] | min, 0] | max %}
-            {% set co2_smooth = co2_phase * co2_phase * (3 - 2 * co2_phase) %}
-            {% set co2_ceiling = min_pos + span * co2_smooth %}
-            {% set thermal_cap = states('sensor.ventilation_zap_thermal_cap') | float(max_pos) if has_value('sensor.ventilation_zap_thermal_cap') else max_pos %}
-            {% set upper = [[([thermal_cap, co2_ceiling] | min), min_pos] | max, max_pos] | min %}
-            {% set previous = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
-            {% set previous_demand = states('sensor.ventilation_recommended_position') | float(equilibrium) %}
-            {% set previous_ts = state_attr('sensor.ventilation_recommended_position', 'last_update_ts') | float(as_timestamp(now()) - 60) %}
-            {% set dt = [[(as_timestamp(now()) - previous_ts) / 60, 0] | max, 2] | min %}
-            {% set generation = state_attr('sensor.ventilation_recommended_position', 'controller_generation') | int(0) %}
-            {% set settings_changed = state_attr('sensor.ventilation_recommended_position', 'previous_target') | float(target) != target or state_attr('sensor.ventilation_recommended_position', 'previous_min_position') | float(min_pos) != min_pos or state_attr('sensor.ventilation_recommended_position', 'previous_max_position') | float(max_pos) != max_pos %}
-            {% set without_integral = equilibrium + kp * error_outside + assist %}
-            {% if generation != 7 or settings_changed or model_changed or trigger.id == 'startup' %}
-              {% set updated = previous_demand - without_integral %}
-            {% elif (without_integral + previous >= upper and error_outside > 0) or (without_integral + previous <= min_pos and error_outside < 0) %}
-              {% set updated = previous %}
-            {% else %}
-              {% set updated = previous + ki * error_outside * dt %}
-            {% endif %}
-            {% set limit = span * 0.25 %}
-            {{ ([[updated, 0 - limit] | max, limit] | min) | round(4) }}
-          co2_recommendation_before_thermal: >
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set raw = state_attr('sensor.ventilation_recommended_position', 'raw_controller_output') | float(min_pos) %}
-            {{ ([[raw, min_pos] | max, max_pos] | min) | round(2) }}
-          raw_controller_output: >
-            {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-            {% set forecast = states('sensor.ventilation_forecast_co2_30m') | float(filtered) %}
-            {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_min_position') | float(0) %}
-            {% set max_pos = states('input_number.ventilation_max_position') | float(80) %}
-            {% set span = [max_pos - min_pos, 0] | max %}
-            {% set error = filtered - target %}
-            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set load = state_attr('sensor.ventilation_zap_room_model', 'accepted_closed_load_estimate_ppm_min') | float(2.597) %}
-            {% set gain = state_attr('sensor.ventilation_zap_room_model', 'accepted_ventilation_gain_estimate_ppm_min_per_fraction') | float(6.681) %}
-            {% set tau = state_attr('sensor.ventilation_zap_room_model', 'accepted_tau_estimate_min') | float(30.715) %}
-            {% set equilibrium = min_pos + span * [[load / ([gain, 0.05] | max), 0] | max, 1] | min %}
-            {% set kp = (0.20 * span) / ([gain * tau, 5] | max) %}
-            {% set kp = [[kp, 0.002] | max, 0.10] | min %}
-            {% set assist = ((forecast - filtered) / ([gain * 10, 1] | max)) * span %}
-            {% set assist = [[assist, -0.05 * span] | max, 0.05 * span] | min %}
-            {% set integral = state_attr('sensor.ventilation_recommended_position', 'integral_term') | float(0) %}
-            {{ (equilibrium + kp * error_outside + assist + integral) | round(2) }}
+          raw_co2: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.filtered_co2 }}"
+          slope_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.slope_ppm_min }}"
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.forecast_co2_30m }}"
+          forecast_error_30m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.forecast_error_30m }}"
+          target: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.target }}"
+          min_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.min_position }}"
+          max_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.max_position }}"
+          deadband_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.deadband_ppm }}"
+          controller_generation: 8
+          controller_family: room_pi_physical_fraction_dual_ceiling_indoor_margin
+          current_applied_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.current_applied_position }}"
+          room_model_confidence_pct: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.room_model_confidence_pct }}"
+          room_model_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.room_model_state }}"
+          thermal_cap_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.thermal_cap_position }}"
+          thermal_limit_active: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.thermal_limit_active }}"
+          co2_ceiling_signal: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.co2_ceiling_signal }}"
+          co2_ceiling_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.co2_ceiling_position }}"
+          co2_ceiling_active: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.co2_ceiling_active }}"
+          room_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.room_temperature }}"
+          soft_upper_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.soft_upper_temperature }}"
+          soft_temperature_span_c: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.soft_temperature_span_c }}"
+          indoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.indoor_minimum_temperature }}"
+          outdoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.outdoor_minimum_temperature }}"
+          room_temperature_slope_c_per_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.room_temperature_slope_c_per_min }}"
+          predicted_room_temperature_10m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.predicted_room_temperature_10m }}"
+          predicted_temperature_headroom_c: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.predicted_temperature_headroom_c }}"
+          normalized_room_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.normalized_room_factor }}"
+          normalized_outdoor_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.normalized_outdoor_factor }}"
+          cooling_time_to_floor_minutes: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.cooling_time_to_floor_minutes }}"
+          thermal_opening_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.thermal_opening_factor }}"
+          thermal_limit_reason: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.thermal_limit_reason }}"
+          last_update_ts: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.last_update_ts }}"
+          previous_target: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.previous_target }}"
+          previous_min_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.previous_min_position }}"
+          previous_max_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.previous_max_position }}"
+          closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.closed_load_estimate_ppm_min }}"
+          vent_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.vent_gain_estimate_ppm_min_per_fraction }}"
+          tau_estimate_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.tau_estimate_min }}"
+          coefficient_source: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.coefficient_source }}"
+          accepted_model_generation: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.accepted_model_generation }}"
+          kp_auto_pct_per_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.kp_auto_pct_per_ppm }}"
+          ti_auto_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.ti_auto_min }}"
+          ki_auto_pct_per_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.ki_auto_pct_per_ppm_min }}"
+          equilibrium_opening: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.equilibrium_opening }}"
+          forecast_assist_pct: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.forecast_assist_pct }}"
+          integral_term: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.integral_term }}"
+          raw_controller_output: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.raw_controller_output }}"
+          co2_recommendation_before_thermal: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.co2_recommendation_before_thermal }}"
+          controller_mode: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.controller_mode }}"
+          dead_zone_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.dead_zone_state }}"
+          anti_windup_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.anti_windup_state }}"
+          error_outside_deadband_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('zap', p) | from_json).attributes.error_outside_deadband_ppm }}"
 
       - name: "Ventilation CO2 Error"
         unique_id: ventilation_co2_error
@@ -1096,21 +483,19 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_co2_filtered') }}
+          {% from 'ventilation.jinja' import calc_co2_error %}
+          {{ (calc_co2_error('zap') | from_json).available }}
         state: >
-          {% set filtered = states('sensor.ventilation_co2_filtered') | float(0) %}
-          {% set target = states('input_number.ventilation_target_co2') | float(650) %}
-          {{ (filtered - target) | round(0) }}
+          {% from 'ventilation.jinja' import calc_co2_error %}
+          {{ (calc_co2_error('zap') | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_zap_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_co2_filtered') | float(0) }}"
-          forecast_co2_30m: "{{ states('sensor.ventilation_forecast_co2_30m') | float(0) }}"
-          forecast_error_10m: "{{ states('sensor.ventilation_forecast_error_30m') | float(0) }}"
+          raw_co2: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('zap') | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('zap') | from_json).attributes.filtered_co2 }}"
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('zap') | from_json).attributes.forecast_co2_30m }}"
+          forecast_error_10m: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('zap') | from_json).attributes.forecast_error_10m }}"
           error_source: "filtered_co2_error"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 3: EVA — ДОЛГИЙ ТРЕНД CO2
-  # ════════════════════════════════════════════════════════════════════════════
+  # ══ EVA ═════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
@@ -1125,63 +510,143 @@ template:
         unique_id: ventilation_eva_co2_trend
         icon: mdi:trending-up
         availability: >
-          {{ has_value('sensor.sensor_eva_co2') and
-             has_value('sensor.ventilation_eva_co2_filtered') and
-             has_value('sensor.ventilation_eva_co2_slope') }}
+          {% from 'ventilation.jinja' import calc_co2_trend %}
+          {{ (calc_co2_trend('eva') | from_json).available }}
         state: >
-          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-          {% set trend_threshold = 0.5 %}
-          {% if slope > trend_threshold %}
-            rising
-          {% elif slope < -trend_threshold %}
-            falling
-          {% else %}
-            stable
-          {% endif %}
+          {% from 'ventilation.jinja' import calc_co2_trend %}
+          {{ (calc_co2_trend('eva') | from_json).state }}
         attributes:
-          current_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          co2_filtered: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
-          co2_slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
+          current_co2: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('eva') | from_json).attributes.current_co2 }}"
+          co2_filtered: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('eva') | from_json).attributes.co2_filtered }}"
+          co2_slope_ppm_min: "{% from 'ventilation.jinja' import calc_co2_trend %}{{ (calc_co2_trend('eva') | from_json).attributes.co2_slope_ppm_min }}"
           trend_threshold_ppm_min: 0.5
           filter_type: "ema_lowpass"
 
-  # ════════════════════════════════════════════════════════════════════════════
-  #  БЛОК 4: EVA — room-local 10m forecast + auto-identified PI controller
-  # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
-      - platform: state
-        entity_id:
-          - sensor.sensor_eva_co2
-          - sensor.ventilation_eva_co2_filtered
-          - sensor.ventilation_eva_co2_slope
-          - input_number.ventilation_eva_target_co2
-          - input_number.ventilation_eva_min_position
-          - input_number.ventilation_eva_max_position
-          - input_number.ventilation_eva_deadband_ppm
-          - cover.drivent_eva_driventokonnyi_privod
-          - input_datetime.ventilation_eva_last_adjustment
+        id: observation
+      - platform: time_pattern
+        minutes: "29"
+        id: cycle_end
+      - platform: time_pattern
+        minutes: "59"
+        id: cycle_end
       - platform: homeassistant
         event: start
+        id: startup
+    sensor:
+      - name: "Ventilation Eva Room Model"
+        unique_id: ventilation_eva_room_model
+        unit_of_measurement: "%"
+        icon: mdi:chart-bell-curve-cumulative
+        state: >
+          {% from 'ventilation.jinja' import calc_room_model %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}
+          {{ (calc_room_model('eva', p, tid) | from_json).state }}
+        attributes:
+          model_generation: 3
+          model_state: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.model_state }}"
+          closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.closed_load_estimate_ppm_min }}"
+          ventilation_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.ventilation_gain_estimate_ppm_min_per_fraction }}"
+          tau_estimate_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.tau_estimate_min }}"
+          accepted_closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.accepted_closed_load_estimate_ppm_min }}"
+          accepted_ventilation_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.accepted_ventilation_gain_estimate_ppm_min_per_fraction }}"
+          accepted_tau_estimate_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.accepted_tau_estimate_min }}"
+          accepted_model_generation: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.accepted_model_generation }}"
+          accepted_total_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.accepted_total_sample_count }}"
+          coefficient_source: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.coefficient_source }}"
+          load_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.load_sample_count }}"
+          gain_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.gain_sample_count }}"
+          tau_sample_count: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.tau_sample_count }}"
+          model_confidence_pct: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.model_confidence_pct }}"
+          sample_applied_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.sample_applied_position }}"
+          sample_slope_ppm_min: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.sample_slope_ppm_min }}"
+          last_target: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_target }}"
+          last_min_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_min_position }}"
+          last_max_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_max_position }}"
+          last_model_update: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_model_update }}"
+
+  - sensor:
+      - name: "Ventilation Eva Safety Temperature"
+        unique_id: ventilation_eva_safety_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:shield-thermometer
+        state: >
+          {% from 'ventilation.jinja' import calc_safety_temp %}
+          {{ (calc_safety_temp('eva') | from_json).state }}
+        attributes:
+          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.requested_mode }}"
+          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.source }}"
+          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.selected_threshold }}"
+          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.unsafe }}"
+          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.fallback_active }}"
+          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.primary_room_temperature }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.outdoor_temperature }}"
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+        id: minute_tick
+      - platform: homeassistant
+        event: start
+        id: startup
+    sensor:
+      - name: "Ventilation Eva Thermal Cap"
+        unique_id: ventilation_eva_thermal_cap
+        unit_of_measurement: "%"
+        icon: mdi:home-thermometer-outline
+        state: >
+          {% from 'ventilation.jinja' import calc_thermal_cap %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_thermal_cap('eva', p) | from_json).state }}
+        attributes:
+          room_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.room_temperature }}"
+          room_temperature_source: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.room_temperature_source }}"
+          soft_upper_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.soft_upper_temperature }}"
+          soft_temperature_span_c: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.soft_temperature_span_c }}"
+          room_temperature_slope_c_per_min: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.room_temperature_slope_c_per_min }}"
+          predicted_room_temperature_10m: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.predicted_room_temperature_10m }}"
+          indoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.indoor_minimum_temperature }}"
+          outdoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.outdoor_minimum_temperature }}"
+          predicted_temperature_headroom_c: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.predicted_temperature_headroom_c }}"
+          normalized_room_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.normalized_room_factor }}"
+          normalized_outdoor_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.normalized_outdoor_factor }}"
+          cooling_time_to_floor_minutes: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.cooling_time_to_floor_minutes }}"
+          thermal_opening_factor: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.thermal_opening_factor }}"
+          outdoor_heat_loss_risk: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.outdoor_heat_loss_risk }}"
+          thermal_limit_active: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.thermal_limit_active }}"
+          thermal_limit_reason: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.thermal_limit_reason }}"
+          minimum_ventilation_position: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.minimum_ventilation_position }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.outdoor_temperature }}"
+          previous_room_temperature: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.previous_room_temperature }}"
+          last_update_ts: "{% from 'ventilation.jinja' import calc_thermal_cap %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_thermal_cap('eva', p) | from_json).attributes.last_update_ts }}"
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+        id: minute_tick
+      - platform: homeassistant
+        event: start
+        id: startup
     sensor:
       - name: "Ventilation Eva Forecast CO2 30m"
         unique_id: ventilation_eva_forecast_co2_30m
         unit_of_measurement: "ppm"
         icon: mdi:chart-timeline-variant
         availability: >
-          {{ has_value('sensor.sensor_eva_co2') and
-             has_value('sensor.ventilation_eva_co2_filtered') and
-             has_value('sensor.ventilation_eva_co2_slope') }}
+          {% from 'ventilation.jinja' import calc_forecast_co2 %}
+          {{ (calc_forecast_co2('eva') | from_json).available }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
-          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-          {{ (filtered + slope * 10) | round(1) }}
+          {% from 'ventilation.jinja' import calc_forecast_co2 %}
+          {{ (calc_forecast_co2('eva') | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
-          slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
+          raw_co2: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('eva') | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('eva') | from_json).attributes.filtered_co2 }}"
+          slope_ppm_min: "{% from 'ventilation.jinja' import calc_forecast_co2 %}{{ (calc_forecast_co2('eva') | from_json).attributes.slope_ppm_min }}"
           forecast_horizon_min: 10
 
       - name: "Ventilation Eva Forecast Error 30m"
@@ -1190,287 +655,82 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_eva_forecast_co2_30m') }}
+          {% from 'ventilation.jinja' import calc_forecast_error %}
+          {{ (calc_forecast_error('eva') | from_json).available }}
         state: >
-          {% set forecast = states('sensor.ventilation_eva_forecast_co2_30m') | float(650) %}
-          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-          {{ (forecast - target) | round(0) }}
+          {% from 'ventilation.jinja' import calc_forecast_error %}
+          {{ (calc_forecast_error('eva') | from_json).state }}
         attributes:
-          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_eva_target_co2') | float(650) }}"
-          deadband_ppm: "{{ states('input_number.ventilation_eva_deadband_ppm') | float(50) }}"
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('eva') | from_json).attributes.forecast_co2_30m }}"
+          target: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('eva') | from_json).attributes.target }}"
+          deadband_ppm: "{% from 'ventilation.jinja' import calc_forecast_error %}{{ (calc_forecast_error('eva') | from_json).attributes.deadband_ppm }}"
 
       - name: "Ventilation Eva Recommended Position"
         unique_id: ventilation_eva_recommended_position
         unit_of_measurement: "%"
         icon: mdi:window-open-variant
         availability: >
-          {{ has_value('sensor.sensor_eva_co2') and
-             has_value('sensor.ventilation_eva_co2_filtered') and
-             has_value('sensor.ventilation_eva_co2_slope') and
-             has_value('sensor.ventilation_eva_forecast_error_30m') }}
+          {% from 'ventilation.jinja' import calc_recommended %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_recommended('eva', p) | from_json).available }}
         state: >
-          {% set raw_co2 = states('sensor.sensor_eva_co2') | float(650) %}
-          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(raw_co2) %}
-          {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-          {% set forecast_co2 = states('sensor.ventilation_eva_forecast_co2_30m') | float(filtered) %}
-          {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-          {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-          {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-          {% set forecast_error = forecast_co2 - target %}
-          {% set error = filtered - target %}
-          {% set range_span = [max_pos - min_pos, 0] | max %}
-          {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
-          {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
-          {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
-          {% set previous_closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
-          {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
-            {% set closed_load = (previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15) %}
-          {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
-            {% set closed_load = (previous_closed_load * 0.97) + 0.003 %}
-          {% else %}
-            {% set closed_load = previous_closed_load %}
-          {% endif %}
-
-          {% set previous_vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-          {% if applied_fraction >= 0.20 %}
-            {% set vent_gain_sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
-            {% set vent_gain_sample = [vent_gain_sample, 0.05] | max %}
-            {% set vent_gain = (previous_vent_gain * 0.85) + (vent_gain_sample * 0.15) %}
-          {% else %}
-            {% set vent_gain = previous_vent_gain %}
-          {% endif %}
-
-          {% set previous_tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
-          {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
-            {% set tau_sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
-            {% set tau_sample = [[tau_sample, 6] | max, 90] | min %}
-            {% set tau_estimate = (previous_tau * 0.85) + (tau_sample * 0.15) %}
-          {% else %}
-            {% set tau_estimate = previous_tau %}
-          {% endif %}
-
-          {% set equilibrium_fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
-          {% set equilibrium_opening = min_pos + (range_span * equilibrium_fraction) %}
-          {% set kp_auto = (0.80 * range_span) / ([vent_gain * tau_estimate, 5] | max) %}
-          {% set kp_auto = [[kp_auto, 0.005] | max, 0.25] | min %}
-          {% set ti_auto = [[tau_estimate * 1.20, 12] | max, 90] | min %}
-          {% set ki_auto = kp_auto / ti_auto %}
-          {% set error_outside_deadband = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-          {% set forecast_delta = forecast_error - error %}
-          {% set forecast_assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
-          {% set forecast_assist = [[forecast_assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
-          {% set previous_integral = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
-          {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
-          {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
-          {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
-          {% set unclamped_without_integral = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist %}
-          {% if gate_blocked %}
-            {% set integral_term = previous_integral * 0.995 %}
-          {% elif (unclamped_without_integral <= min_pos and error_outside_deadband < 0) or (unclamped_without_integral >= max_pos and error_outside_deadband > 0) %}
-            {% set integral_term = previous_integral * 0.98 %}
-          {% elif (error | abs) <= deadband %}
-            {% set integral_term = previous_integral * 0.98 %}
-          {% else %}
-            {% set integral_term = previous_integral + (ki_auto * error_outside_deadband) %}
-          {% endif %}
-          {% set integral_limit = range_span * 0.80 %}
-          {% set integral_term = [[integral_term, 0 - integral_limit] | max, integral_limit] | min %}
-          {% set raw_output = equilibrium_opening + (kp_auto * error_outside_deadband) + forecast_assist + integral_term %}
-          {% set recommended = [([raw_output, min_pos] | max), max_pos] | min %}
-          {{ recommended | round(1) }}
+          {% from 'ventilation.jinja' import calc_recommended %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_recommended('eva', p) | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
-          slope_ppm_min: "{{ states('sensor.ventilation_eva_co2_slope') | float(0) }}"
-          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
-          forecast_error_30m: "{{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) }}"
-          target: "{{ states('input_number.ventilation_eva_target_co2') | float(650) }}"
-          min_position: "{{ states('input_number.ventilation_eva_min_position') | int(0) }}"
-          max_position: "{{ states('input_number.ventilation_eva_max_position') | int(80) }}"
-          deadband_ppm: "{{ states('input_number.ventilation_eva_deadband_ppm') | float(50) }}"
-          controller_family: room_pi_auto_identified
-          current_applied_position: "{{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(0) }}"
-          controller_mode: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% set error = filtered - target %}
-            {% if error > deadband %}
-              opening_to_reduce_co2
-            {% elif error < (0 - deadband) %}
-              closing_to_hold_heat
-            {% else %}
-              holding_equilibrium
-            {% endif %}
-          dead_zone_state: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% if ((filtered - target) | abs) <= deadband %}
-              inside_dead_zone
-            {% else %}
-              outside_dead_zone
-            {% endif %}
-          anti_windup_state: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
-            {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
-            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
-            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
-            {% if gate_blocked %}
-              gated_freeze
-            {% elif (error | abs) <= deadband %}
-              deadband_decay
-            {% else %}
-              active_integrating
-            {% endif %}
-          error_outside_deadband_ppm: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% set error = filtered - target %}
-            {{ (0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1)) | round(1) }}
-          slope_factor: >
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {{ ([([slope / 2.5, 1] | min), -1] | max) | round(3) }}
-          forecast_assist_pct: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
-            {% set error = filtered - target %}
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set forecast_delta = forecast_error - error %}
-            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
-            {{ ([[assist, -0.20 * range_span] | max, 0.20 * range_span] | min) | round(2) }}
-          equilibrium_opening: >
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set fraction = [[(closed_load / ([vent_gain, 0.05] | max)), 0] | max, 1] | min %}
-            {{ (min_pos + (range_span * fraction)) | round(2) }}
-          kp_auto_pct_per_ppm: >
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
-            {% set kp = (0.80 * range_span) / ([vent_gain * tau, 5] | max) %}
-            {{ ([[kp, 0.005] | max, 0.25] | min) | round(4) }}
-          ki_auto_pct_per_ppm_min: >
-            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
-            {% set tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
-            {% set ti = [[tau * 1.20, 12] | max, 90] | min %}
-            {{ (kp / ti) | round(5) }}
-          tau_estimate_min: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {% set previous_tau = state_attr('sensor.ventilation_eva_recommended_position', 'tau_estimate_min') | float(25) %}
-            {% if (error > 25 and slope < -0.05) or (error < -25 and slope > 0.05) %}
-              {% set sample = ((error | abs) / ([slope | abs, 0.05] | max)) %}
-              {% set sample = [[sample, 6] | max, 90] | min %}
-              {{ ((previous_tau * 0.85) + (sample * 0.15)) | round(2) }}
-            {% else %}
-              {{ previous_tau | round(2) }}
-            {% endif %}
-          vent_gain_estimate_ppm_min_per_fraction: >
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
-            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
-            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {% set closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% set previous_vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% if applied_fraction >= 0.20 %}
-              {% set sample = ((closed_load - slope) / applied_fraction) if applied_fraction > 0 else previous_vent_gain %}
-              {% set sample = [sample, 0.05] | max %}
-              {{ ((previous_vent_gain * 0.85) + (sample * 0.15)) | round(3) }}
-            {% else %}
-              {{ previous_vent_gain | round(3) }}
-            {% endif %}
-          closed_load_estimate_ppm_min: >
-            {% set slope = states('sensor.ventilation_eva_co2_slope') | float(0) %}
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
-            {% set applied_fraction = ((applied_position - min_pos) / (range_span if range_span > 0 else 1)) if range_span > 0 else 0 %}
-            {% set applied_fraction = [[applied_fraction, 0] | max, 1] | min %}
-            {% set previous_closed_load = state_attr('sensor.ventilation_eva_recommended_position', 'closed_load_estimate_ppm_min') | float(0.2) %}
-            {% if applied_fraction <= 0.10 and error > deadband and slope > -0.20 %}
-              {{ ((previous_closed_load * 0.85) + ([slope, 0.05] | max * 0.15)) | round(3) }}
-            {% elif applied_fraction <= 0.10 and error < (0 - deadband) %}
-              {{ ((previous_closed_load * 0.97) + 0.003) | round(3) }}
-            {% else %}
-              {{ previous_closed_load | round(3) }}
-            {% endif %}
-          raw_controller_output: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(0) %}
-            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set equilibrium = state_attr('sensor.ventilation_eva_recommended_position', 'equilibrium_opening') | float(min_pos) %}
-            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
-            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set assist = ((forecast_error - error) / ([vent_gain * 10, 1] | max)) * range_span %}
-            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
-            {% set integral_term = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
-            {% set raw_output = equilibrium + (kp * error_outside) + assist + integral_term %}
-            {{ raw_output | round(2) }}
-
-          integral_term: >
-            {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-            {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-            {% set error = filtered - target %}
-            {% set deadband = states('input_number.ventilation_eva_deadband_ppm') | float(50) %}
-            {% set min_pos = states('input_number.ventilation_eva_min_position') | int(0) %}
-            {% set max_pos = states('input_number.ventilation_eva_max_position') | int(80) %}
-            {% set range_span = [max_pos - min_pos, 0] | max %}
-            {% set previous_integral = state_attr('sensor.ventilation_eva_recommended_position', 'integral_term') | float(0) %}
-            {% set applied_position = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | float(min_pos) %}
-            {% set previous_demand = states('sensor.ventilation_eva_recommended_position') | float(applied_position) %}
-            {% set last_adjustment_ts = as_timestamp(states('input_datetime.ventilation_eva_last_adjustment')) | float(0) %}
-            {% set gate_blocked = ((as_timestamp(now()) - last_adjustment_ts) < 1700) and ((previous_demand - applied_position) | abs > 2) %}
-            {% set error_outside = 0 if (error | abs) <= deadband else ((error | abs) - deadband) * (1 if error > 0 else -1) %}
-            {% set equilibrium = state_attr('sensor.ventilation_eva_recommended_position', 'equilibrium_opening') | float(min_pos) %}
-            {% set kp = state_attr('sensor.ventilation_eva_recommended_position', 'kp_auto_pct_per_ppm') | float(0.05) %}
-            {% set ki = state_attr('sensor.ventilation_eva_recommended_position', 'ki_auto_pct_per_ppm_min') | float(0.002) %}
-            {% set vent_gain = state_attr('sensor.ventilation_eva_recommended_position', 'vent_gain_estimate_ppm_min_per_fraction') | float(0.8) %}
-            {% set forecast_error = states('sensor.ventilation_eva_forecast_error_30m') | float(error) %}
-            {% set forecast_delta = forecast_error - error %}
-            {% set assist = (forecast_delta / ([vent_gain * 10, 1] | max)) * range_span %}
-            {% set assist = [[assist, -0.20 * range_span] | max, 0.20 * range_span] | min %}
-            {% set unclamped = equilibrium + (kp * error_outside) + assist %}
-            {% if gate_blocked %}
-              {% set new_integral = previous_integral * 0.995 %}
-            {% elif (unclamped <= min_pos and error_outside < 0) or (unclamped >= max_pos and error_outside > 0) %}
-              {% set new_integral = previous_integral * 0.98 %}
-            {% elif (error | abs) <= deadband %}
-              {% set new_integral = previous_integral * 0.98 %}
-            {% else %}
-              {% set new_integral = previous_integral + (ki * error_outside) %}
-            {% endif %}
-            {% set integral_limit = range_span * 0.80 %}
-            {{ ([[new_integral, 0 - integral_limit] | max, integral_limit] | min) | round(3) }}
+          raw_co2: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.filtered_co2 }}"
+          slope_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.slope_ppm_min }}"
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.forecast_co2_30m }}"
+          forecast_error_30m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.forecast_error_30m }}"
+          target: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.target }}"
+          min_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.min_position }}"
+          max_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.max_position }}"
+          deadband_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.deadband_ppm }}"
+          controller_generation: 8
+          controller_family: room_pi_physical_fraction_dual_ceiling_indoor_margin
+          current_applied_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.current_applied_position }}"
+          room_model_confidence_pct: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.room_model_confidence_pct }}"
+          room_model_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.room_model_state }}"
+          thermal_cap_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.thermal_cap_position }}"
+          thermal_limit_active: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.thermal_limit_active }}"
+          co2_ceiling_signal: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.co2_ceiling_signal }}"
+          co2_ceiling_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.co2_ceiling_position }}"
+          co2_ceiling_active: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.co2_ceiling_active }}"
+          room_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.room_temperature }}"
+          soft_upper_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.soft_upper_temperature }}"
+          soft_temperature_span_c: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.soft_temperature_span_c }}"
+          indoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.indoor_minimum_temperature }}"
+          outdoor_minimum_temperature: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.outdoor_minimum_temperature }}"
+          room_temperature_slope_c_per_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.room_temperature_slope_c_per_min }}"
+          predicted_room_temperature_10m: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.predicted_room_temperature_10m }}"
+          predicted_temperature_headroom_c: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.predicted_temperature_headroom_c }}"
+          normalized_room_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.normalized_room_factor }}"
+          normalized_outdoor_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.normalized_outdoor_factor }}"
+          cooling_time_to_floor_minutes: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.cooling_time_to_floor_minutes }}"
+          thermal_opening_factor: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.thermal_opening_factor }}"
+          thermal_limit_reason: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.thermal_limit_reason }}"
+          last_update_ts: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.last_update_ts }}"
+          previous_target: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.previous_target }}"
+          previous_min_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.previous_min_position }}"
+          previous_max_position: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.previous_max_position }}"
+          closed_load_estimate_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.closed_load_estimate_ppm_min }}"
+          vent_gain_estimate_ppm_min_per_fraction: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.vent_gain_estimate_ppm_min_per_fraction }}"
+          tau_estimate_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.tau_estimate_min }}"
+          coefficient_source: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.coefficient_source }}"
+          accepted_model_generation: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.accepted_model_generation }}"
+          kp_auto_pct_per_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.kp_auto_pct_per_ppm }}"
+          ti_auto_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.ti_auto_min }}"
+          ki_auto_pct_per_ppm_min: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.ki_auto_pct_per_ppm_min }}"
+          equilibrium_opening: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.equilibrium_opening }}"
+          forecast_assist_pct: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.forecast_assist_pct }}"
+          integral_term: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.integral_term }}"
+          raw_controller_output: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.raw_controller_output }}"
+          co2_recommendation_before_thermal: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.co2_recommendation_before_thermal }}"
+          controller_mode: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.controller_mode }}"
+          dead_zone_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.dead_zone_state }}"
+          anti_windup_state: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.anti_windup_state }}"
+          error_outside_deadband_ppm: "{% from 'ventilation.jinja' import calc_recommended %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_recommended('eva', p) | from_json).attributes.error_outside_deadband_ppm }}"
 
       - name: "Ventilation Eva CO2 Error"
         unique_id: ventilation_eva_co2_error
@@ -1478,27 +738,120 @@ template:
         state_class: measurement
         icon: mdi:delta
         availability: >
-          {{ has_value('sensor.ventilation_eva_co2_filtered') }}
+          {% from 'ventilation.jinja' import calc_co2_error %}
+          {{ (calc_co2_error('eva') | from_json).available }}
         state: >
-          {% set filtered = states('sensor.ventilation_eva_co2_filtered') | float(0) %}
-          {% set target = states('input_number.ventilation_eva_target_co2') | float(650) %}
-          {{ (filtered - target) | round(0) }}
+          {% from 'ventilation.jinja' import calc_co2_error %}
+          {{ (calc_co2_error('eva') | from_json).state }}
         attributes:
-          raw_co2: "{{ states('sensor.sensor_eva_co2') | float(0) }}"
-          filtered_co2: "{{ states('sensor.ventilation_eva_co2_filtered') | float(0) }}"
-          forecast_co2_30m: "{{ states('sensor.ventilation_eva_forecast_co2_30m') | float(0) }}"
-          forecast_error_10m: "{{ states('sensor.ventilation_eva_forecast_error_30m') | float(0) }}"
+          raw_co2: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('eva') | from_json).attributes.raw_co2 }}"
+          filtered_co2: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('eva') | from_json).attributes.filtered_co2 }}"
+          forecast_co2_30m: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('eva') | from_json).attributes.forecast_co2_30m }}"
+          forecast_error_10m: "{% from 'ventilation.jinja' import calc_co2_error %}{{ (calc_co2_error('eva') | from_json).attributes.forecast_error_10m }}"
           error_source: "filtered_co2_error"
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  AUTOMATIONS
+#  SHARED SCRIPTS (единая исполнительная логика для всех комнат)
+# ──────────────────────────────────────────────────────────────────────────────
+
+script:
+  ventilation_apply_room_control:
+    alias: "Вентиляция: применить рекомендуемую позицию"
+    mode: parallel
+    max: 4
+    fields:
+      room:
+        description: "Ключ комнаты (zap или eva)"
+        required: true
+    sequence:
+      - variables:
+          gate: >
+            {% from 'ventilation.jinja' import eval_control_gate %}
+            {{ eval_control_gate(room) | from_json }}
+      - service: cover.set_cover_position
+        target:
+          entity_id: "{{ gate.cover }}"
+        data:
+          position: "{{ gate.recommended }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: "{{ gate.last_adjustment }}"
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  ventilation_apply_safety_close:
+    alias: "Вентиляция: аварийное закрытие окна"
+    mode: parallel
+    max: 4
+    fields:
+      room:
+        description: "Ключ комнаты (zap или eva)"
+        required: true
+    sequence:
+      - variables:
+          safety: >
+            {% from 'ventilation.jinja' import eval_safety_close %}
+            {{ eval_safety_close(room) | from_json }}
+      - service: cover.close_cover
+        target:
+          entity_id: "{{ safety.cover }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: "{{ safety.last_adjustment }}"
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - action: telegram_bot.send_message
+        continue_on_error: true
+        data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
+          title: "🪟 Окно {{ safety.label }} закрыто (безопасность)"
+          message: >
+            Причина: {{ safety.reason }}.
+            {% if safety.reason in ['cold_indoor_primary', 'cold_outdoor'] %}
+              Выбранная температура: {{ safety.selected_temp }}°C.
+              Источник: {{ safety.source }}.
+              Минимум: {{ safety.threshold }}°C.
+            {% elif safety.reason == 'temperature_sources_unavailable' %}
+              Все разрешённые источники температуры недоступны. Выполнено fail-safe закрытие.
+            {% elif safety.reason == 'overload' %}
+              Привод обнаружил перегрузку ({{ safety.label }}). Проверьте окна.
+            {% elif safety.reason == 'co2_sensor_lost' %}
+              Датчик CO2 недоступен. Окно закрыто в целях безопасности.
+            {% endif %}
+
+  ventilation_notify_device_error:
+    alias: "Вентиляция: уведомление о перегрузке привода"
+    mode: parallel
+    max: 4
+    fields:
+      room:
+        description: "Ключ комнаты (zap или eva)"
+        required: true
+    sequence:
+      - variables:
+          info: >
+            {% from 'ventilation.jinja' import get_device_error_info %}
+            {{ get_device_error_info(room) | from_json }}
+      - action: telegram_bot.send_message
+        continue_on_error: true
+        data:
+          entity_id: notify.telegram_bot_8110302509_1002699581686
+          title: "⚠️ Перегрузка привода Drivent ({{ info.label }})"
+          message: >
+            Привод обнаружил перегрузку. Проверьте:
+            - не зажато ли что-то в окне
+            - открывается ли окно без заеданий
+            - не заблокирована ли ручка
+
+            Текущий CO2 ({{ info.label }}): {{ info.co2 }} ppm
+            Позиция окна: {{ info.position }}%
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  AUTOMATIONS (тонкие обёртки для комнат на общем движке)
 # ──────────────────────────────────────────────────────────────────────────────
 
 automation:
-  # ══════════════════════════════════════════════════════════════════════════
-  #  ОСНОВНОЕ УПРАВЛЕНИЕ: применить рекомендуемую позицию к приводу
-  #  Rate limit: не чаще 1 реального движения в 30 минут
-  # ══════════════════════════════════════════════════════════════════════════
+  # ══ ZAP ═════════════════════════════════════════════════════════════════════
   - id: "Управление вентиляцией по CO2"
     alias: ventilation_control_main
     mode: single
@@ -1510,57 +863,16 @@ automation:
         minutes: "/30"
 
     condition:
-      # Позиция реально изменилась; control logic остаётся в recommendation.
       - condition: template
         value_template: >
-          {% set recommended = states('sensor.ventilation_recommended_position') | int(-1) %}
-          {% set current = state_attr('cover.ventilation_zap_group', 'current_position') | int(0) %}
-          {{ recommended >= 0 and recommended != current }}
-
-      # Rate limit: минимум 30 минут между движениями привода
-      - condition: template
-        value_template: >
-          {% set last = states('input_datetime.ventilation_last_adjustment') %}
-          {% set last_ts = as_timestamp(last) | float(0) %}
-          {{ (as_timestamp(now()) - last_ts) >= 1800 }}
-
-      # Нет активных ошибок привода
-      - condition: template
-        value_template: >
-          {{ is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'off') and
-             is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'off') }}
-
-      # CO2 сенсор доступен
-      - condition: template
-        value_template: >
-          {{ has_value('sensor.sensor_zap_co2') }}
-
-      # Выбранная temperature source не ниже соответствующего safety threshold
-      - condition: template
-        value_template: >
-          {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
-          {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
-          {{ is_number(selected) and threshold is not none and selected | float > threshold | float }}
+          {% from 'ventilation.jinja' import eval_control_gate %}
+          {{ (eval_control_gate('zap') | from_json).allowed }}
 
     action:
-      - variables:
-          recommended: "{{ states('sensor.ventilation_recommended_position') | int(0) }}"
-
-      - service: cover.set_cover_position
-        target:
-          entity_id: cover.ventilation_zap_group
+      - service: script.ventilation_apply_room_control
         data:
-          position: "{{ recommended }}"
+          room: "zap"
 
-      - service: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ventilation_last_adjustment
-        data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  АВАРИЙНОЕ ЗАКРЫТИЕ: selected temperature, перегрузка, недоступность CO2
-  # ══════════════════════════════════════════════════════════════════════════
   - id: "Аварийное закрытие окна"
     alias: ventilation_safety_close
     mode: single
@@ -1568,15 +880,14 @@ automation:
     initial_state: true
 
     trigger:
-      # Выбранная temperature source стала ниже своего порога либо недоступна
       - platform: template
         value_template: >
-          {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
-          {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
-          {{ not is_number(selected) or threshold is none or selected | float <= threshold | float }}
+          {% from 'ventilation.jinja' import eval_safety_close %}
+          {{ (eval_safety_close('zap') | from_json).temp_unsafe }}
+        for:
+          seconds: 15
         id: "cold"
 
-      # Перегрузка привода
       - platform: state
         entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
         to: "on"
@@ -1587,7 +898,6 @@ automation:
         to: "on"
         id: "overload"
 
-      # CO2 сенсор стал unavailable (потеря связи)
       - platform: state
         entity_id: sensor.sensor_zap_co2
         to: "unavailable"
@@ -1595,91 +905,21 @@ automation:
           minutes: 2
         id: "co2_lost"
 
-      # Периодическая проверка (каждые 10 мин)
       - platform: time_pattern
         minutes: "/10"
         id: "periodic"
 
     condition:
-      # Окно реально открыто
       - condition: template
         value_template: >
-          {{ state_attr('cover.ventilation_zap_group', 'current_position') | int(0) > 0 }}
-
-      # Хотя бы одно условие для закрытия выполнено
-      - condition: or
-        conditions:
-          # Выбранная temperature source ниже порога либо полностью недоступна
-          - condition: template
-            value_template: >
-              {% set selected = states('sensor.ventilation_zap_safety_temperature') %}
-              {% set threshold = state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') %}
-              {{ not is_number(selected) or threshold is none or selected | float <= threshold | float }}
-          # Перегрузка привода
-          - condition: state
-            entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
-            state: "on"
-          - condition: state
-            entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
-            state: "on"
-          # CO2 сенсор недоступен
-          - condition: state
-            entity_id: sensor.sensor_zap_co2
-            state: "unavailable"
+          {% from 'ventilation.jinja' import eval_safety_close %}
+          {{ (eval_safety_close('zap') | from_json).should_close }}
 
     action:
-      - variables:
-          reason: >
-            {% if is_state('binary_sensor.drivent_zap_left_datchik_peregruzki', 'on') %}
-              overload_left
-            {% elif is_state('binary_sensor.drivent_zap_back_datchik_peregruzki', 'on') %}
-              overload_back
-            {% elif is_state('sensor.sensor_zap_co2', 'unavailable') %}
-              co2_sensor_lost
-            {% else %}
-              {% set source = state_attr('sensor.ventilation_zap_safety_temperature', 'source') | default('unavailable', true) %}
-              {% if source == 'primary_room' %}
-                cold_indoor_primary
-              {% elif source == 'radiator_valve' %}
-                cold_indoor_radiator_valve
-              {% elif source == 'outdoor' %}
-                cold_outdoor
-              {% else %}
-                temperature_sources_unavailable
-              {% endif %}
-            {% endif %}
-
-      - service: cover.close_cover
-        target:
-          entity_id: cover.ventilation_zap_group
-
-      - service: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ventilation_last_adjustment
+      - service: script.ventilation_apply_safety_close
         data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          room: "zap"
 
-      - action: telegram_bot.send_message
-        data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
-          title: "🪟 Окно закрыто (безопасность)"
-          message: >
-            Причина: {{ reason }}.
-            {% if reason in ['cold_indoor_primary', 'cold_indoor_radiator_valve', 'cold_outdoor'] %}
-              Выбранная температура: {{ states('sensor.ventilation_zap_safety_temperature') }}°C.
-              Источник: {{ state_attr('sensor.ventilation_zap_safety_temperature', 'source') }}.
-              Минимум: {{ state_attr('sensor.ventilation_zap_safety_temperature', 'selected_threshold') }}°C.
-            {% elif reason == 'temperature_sources_unavailable' %}
-              Все разрешённые источники температуры недоступны. Выполнено fail-safe закрытие.
-            {% elif reason in ['overload_left', 'overload_back'] %}
-              Привод обнаружил перегрузку ({{ reason }}). Проверьте окна.
-            {% elif reason == 'co2_sensor_lost' %}
-              Датчик CO2 недоступен. Окно закрыто в целях безопасности.
-            {% endif %}
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  УВЕДОМЛЕНИЕ ОБ ОШИБКЕ ПРИВОДА
-  # ══════════════════════════════════════════════════════════════════════════
   - id: "Ошибка привода окна"
     alias: ventilation_device_error
     mode: single
@@ -1695,22 +935,11 @@ automation:
         to: "on"
 
     action:
-      - action: telegram_bot.send_message
+      - service: script.ventilation_notify_device_error
         data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
-          title: "⚠️ Перегрузка привода Drivent (zap_left)"
-          message: >
-            Привод обнаружил перегрузку. Проверьте:
-            - не зажато ли что-то в окне
-            - открывается ли окно без заеданий
-            - не заблокирована ли ручка
+          room: "zap"
 
-            Текущий CO2: {{ states('sensor.sensor_zap_co2') }} ppm
-            Позиция группы окон: {{ state_attr('cover.ventilation_zap_group', 'current_position') }}%
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  EVA: ОСНОВНОЕ УПРАВЛЕНИЕ
-  # ══════════════════════════════════════════════════════════════════════════
+  # ══ EVA ═════════════════════════════════════════════════════════════════════
   - id: "Управление вентиляцией по CO2 eva"
     alias: ventilation_eva_control_main
     mode: single
@@ -1724,49 +953,14 @@ automation:
     condition:
       - condition: template
         value_template: >
-          {% set recommended = states('sensor.ventilation_eva_recommended_position') | int(-1) %}
-          {% set current = state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) %}
-          {{ recommended >= 0 and recommended != current }}
-
-      - condition: template
-        value_template: >
-          {% set last = states('input_datetime.ventilation_eva_last_adjustment') %}
-          {% set last_ts = as_timestamp(last) | float(0) %}
-          {{ (as_timestamp(now()) - last_ts) >= 1800 }}
-
-      - condition: state
-        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
-        state: "off"
-
-      - condition: template
-        value_template: >
-          {{ has_value('sensor.sensor_eva_co2') }}
-
-      - condition: template
-        value_template: >
-          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
-          {{ outdoor >= min_temp }}
+          {% from 'ventilation.jinja' import eval_control_gate %}
+          {{ (eval_control_gate('eva') | from_json).allowed }}
 
     action:
-      - variables:
-          recommended: "{{ states('sensor.ventilation_eva_recommended_position') | int(0) }}"
-
-      - service: cover.set_cover_position
-        target:
-          entity_id: cover.drivent_eva_driventokonnyi_privod
+      - service: script.ventilation_apply_room_control
         data:
-          position: "{{ recommended }}"
+          room: "eva"
 
-      - service: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ventilation_eva_last_adjustment
-        data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  EVA: АВАРИЙНОЕ ЗАКРЫТИЕ
-  # ══════════════════════════════════════════════════════════════════════════
   - id: "Аварийное закрытие окна eva"
     alias: ventilation_eva_safety_close
     mode: single
@@ -1776,9 +970,10 @@ automation:
     trigger:
       - platform: template
         value_template: >
-          {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-          {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
-          {{ outdoor < min_temp }}
+          {% from 'ventilation.jinja' import eval_safety_close %}
+          {{ (eval_safety_close('eva') | from_json).temp_unsafe }}
+        for:
+          seconds: 15
         id: "cold"
 
       - platform: state
@@ -1800,61 +995,14 @@ automation:
     condition:
       - condition: template
         value_template: >
-          {{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') | int(0) > 0 }}
-
-      - condition: or
-        conditions:
-          - condition: template
-            value_template: >
-              {% set outdoor = state_attr('weather.forecast_home_assistant', 'temperature') | float(0) %}
-              {% set min_temp = states('input_number.ventilation_eva_min_outdoor_temp') | float(-10) %}
-              {{ outdoor < min_temp }}
-          - condition: state
-            entity_id: binary_sensor.drivent_eva_datchik_peregruzki
-            state: "on"
-          - condition: state
-            entity_id: sensor.sensor_eva_co2
-            state: "unavailable"
+          {% from 'ventilation.jinja' import eval_safety_close %}
+          {{ (eval_safety_close('eva') | from_json).should_close }}
 
     action:
-      - variables:
-          reason: >
-            {% if is_state('binary_sensor.drivent_eva_datchik_peregruzki', 'on') %}
-              overload
-            {% elif is_state('sensor.sensor_eva_co2', 'unavailable') %}
-              co2_sensor_lost
-            {% else %}
-              cold_outdoor
-            {% endif %}
-
-      - service: cover.close_cover
-        target:
-          entity_id: cover.drivent_eva_driventokonnyi_privod
-
-      - service: input_datetime.set_datetime
-        target:
-          entity_id: input_datetime.ventilation_eva_last_adjustment
+      - service: script.ventilation_apply_safety_close
         data:
-          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          room: "eva"
 
-      - action: telegram_bot.send_message
-        data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
-          title: "🪟 Окно Eva закрыто (безопасность)"
-          message: >
-            Причина: {{ reason }}.
-            {% if reason == 'cold_outdoor' %}
-              Температура на улице: {{ state_attr('weather.forecast_home_assistant', 'temperature') }}°C
-              (мин: {{ states('input_number.ventilation_eva_min_outdoor_temp') }}°C).
-            {% elif reason == 'overload' %}
-              Привод Eva обнаружил перегрузку. Проверьте окно.
-            {% elif reason == 'co2_sensor_lost' %}
-              Датчик CO2 Eva недоступен. Окно закрыто в целях безопасности.
-            {% endif %}
-
-  # ══════════════════════════════════════════════════════════════════════════
-  #  EVA: УВЕДОМЛЕНИЕ ОБ ОШИБКЕ ПРИВОДА
-  # ══════════════════════════════════════════════════════════════════════════
   - id: "Ошибка привода окна eva"
     alias: ventilation_eva_device_error
     mode: single
@@ -1866,15 +1014,6 @@ automation:
         to: "on"
 
     action:
-      - action: telegram_bot.send_message
+      - service: script.ventilation_notify_device_error
         data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
-          title: "⚠️ Перегрузка привода Drivent (eva)"
-          message: >
-            Привод Eva обнаружил перегрузку. Проверьте:
-            - не зажато ли что-то в окне
-            - открывается ли окно без заеданий
-            - не заблокирована ли ручка
-
-            Текущий CO2 Eva: {{ states('sensor.sensor_eva_co2') }} ppm
-            Позиция окна Eva: {{ state_attr('cover.drivent_eva_driventokonnyi_privod', 'current_position') }}%
+          room: "eva"
