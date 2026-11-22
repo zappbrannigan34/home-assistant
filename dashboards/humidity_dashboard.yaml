@@ -1,5 +1,6 @@
 views:
-  - title: Humidity Control
+  - title: Zap
+    path: zap
     type: sidebar
     cards:
       # ----------------------------------------------------------------------
@@ -9,13 +10,18 @@ views:
         # ENTITIES FIRST — $fn stores vars that layout reads
         entities:
           # 1. Current Humidity (y1) — stores min/max in vars
-          - entity: sensor.sensor_eva_humidity
+          - entity: sensor.sensor_zap_humidity
             name: Humidity
             yaxis: y
             filters:
+              - median:
+                  window_size: 5
+                  extended: true
+              - exponential_moving_average:
+                  alpha: 0.06
               - sliding_window_moving_average:
-                  window_size: 2
-                  relative_to_visible: true
+                  window_size: 5
+                  extended: true
               - fn: |-
                   ({ys, vars}) => {
                     const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
@@ -23,7 +29,7 @@ views:
                       vars.hum_min = Math.min(...nums);
                       vars.hum_max = Math.max(...nums);
                     } else {
-                      vars.hum_min = 30;
+                      vars.hum_min = 35;
                       vars.hum_max = 50;
                     }
                     return null;
@@ -37,13 +43,18 @@ views:
             showlegend: true
 
           # 2. Error (y2) — stores min/max in vars
-          - entity: sensor.humidity_error
+          - entity: sensor.humidity_zap_error
             name: Error
             yaxis: y2
             filters:
+              - median:
+                  window_size: 3
+                  extended: true
+              - exponential_moving_average:
+                  alpha: 0.10
               - sliding_window_moving_average:
-                  window_size: 2
-                  relative_to_visible: true
+                  window_size: 5
+                  extended: true
               - fn: |-
                   ({ys, vars}) => {
                     const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
@@ -65,7 +76,7 @@ views:
             showlegend: true
 
           # 3. Intensity (y3) — step line
-          - entity: number.humidifier_puh_9105_puh_2709_intensity
+          - entity: number.humidifier_puh_9105_puh_2709_intensity_2
             name: Intensity
             yaxis: y3
             line:
@@ -79,14 +90,26 @@ views:
         layout:
           height: 600
           shapes:
+            # ±0.5% deadband zone around effective target
+            - type: rect
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) - 0.5
+              y1: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) + 0.5
+              fillcolor: rgba(255, 152, 0, 0.08)
+              line:
+                width: 0
+              layer: below
             # Target humidity line on y1
             - type: line
               xref: paper
               x0: 0
               x1: 1
               yref: y
-              y0: $ex parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40
-              y1: $ex parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40
+              y0: $ex parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35
+              y1: $ex parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35
               line:
                 color: '#FF9800'
                 width: 2
@@ -124,7 +147,7 @@ views:
                   step: hour
                   stepmode: backward
 
-          # y1: Humidity (%) — target всегда посередине, симметричный zoom
+          # y1: Humidity (%) — effective target всегда посередине, симметричный zoom
           #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
           yaxis:
             title: Humidity (%)
@@ -133,10 +156,10 @@ views:
             autorange: false
             range: |-
               $fn ({vars, hass}) => {
-                const target = parseFloat(hass.states['sensor.adaptive_target_humidity']?.state) || 40;
+                const target = parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35;
                 const hMin = vars.hum_min ?? target;
                 const hMax = vars.hum_max ?? target;
-                const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 2);
+                const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 1.5);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
               }
@@ -186,7 +209,7 @@ views:
           position: sidebar
         cards:
           - type: gauge
-            entity: sensor.sensor_eva_humidity
+            entity: sensor.humidity_zap_filtered
             name: Current
             min: 0
             max: 100
@@ -204,7 +227,350 @@ views:
             needle: true
 
           - type: gauge
-            entity: sensor.adaptive_target_humidity
+            entity: sensor.humidity_zap_target_humidity
+            name: Target
+            min: 0
+            max: 100
+            needle: true
+            severity:
+              green: 30
+              yellow: 0
+              red: 0
+
+          - type: gauge
+            entity: sensor.humidifier_zap_water_level
+            name: Water
+            unit: "%"
+            min: 0
+            max: 100
+            segments:
+              - from: 0
+                color: '#db4437'
+              - from: 10
+                color: '#f4b400'
+              - from: 25
+                color: '#43a047'
+            needle: true
+
+      # ----------------------------------------------------------------------
+      # Секция 3: Controls (sidebar)
+      # ----------------------------------------------------------------------
+      - type: entities
+        title: Zap Controls
+        show_header_toggle: false
+        state_color: true
+        view_layout:
+          position: sidebar
+        entities:
+          - entity: automation.humidity_zap_control_main
+            name: Auto Control
+          - entity: input_boolean.humidity_zap_adaptive_target
+            name: Adaptive Target
+          - entity: input_number.humidity_zap_target
+            name: Target Humidity
+          - entity: sensor.humidity_zap_target_humidity
+            name: Effective Target
+          - entity: sensor.humidity_zap_adaptive_target
+            name: Adaptive Formula
+
+      # ----------------------------------------------------------------------
+      # Секция 4: Diagnostics (sidebar)
+      # ----------------------------------------------------------------------
+      - type: entities
+        title: Zap Diagnostics
+        show_header_toggle: false
+        state_color: true
+        view_layout:
+          position: sidebar
+        entities:
+          - entity: sensor.sensor_zap_temperature
+            name: Room Temp
+          - entity: weather.forecast_home_assistant
+            attribute: temperature
+            name: Outdoor Temp
+            icon: mdi:thermometer
+
+          - type: divider
+
+          - entity: sensor.humidity_zap_filtered
+            name: Filtered Humidity
+          - entity: sensor.sensor_zap_humidity
+            name: Raw Humidity
+          - entity: sensor.humidity_zap_slope
+            name: Slope (5m)
+          - entity: sensor.humidity_zap_error
+            name: Error
+          - entity: sensor.humidity_zap_rate
+            name: Rate
+          - entity: sensor.humidity_zap_recommended_intensity
+            name: Recommended Intensity
+            icon: mdi:gauge
+          - entity: number.humidifier_puh_9105_puh_2709_intensity_2
+            name: Intensity
+            icon: mdi:fan
+          - entity: switch.humidifier_puh_9105_puh_2709_power_2
+            name: Power
+          - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
+            name: Device Mode
+
+          - type: divider
+
+          - entity: sensor.humidifier_zap_water_level
+            name: Water Level
+            icon: mdi:water-percent
+          - type: attribute
+            entity: sensor.humidifier_zap_water_level
+            attribute: hours_remaining
+            name: Time Remaining (h)
+            icon: mdi:clock-outline
+            suffix: h
+          - entity: input_boolean.humidifier_zap_needs_refill
+            name: Needs Refill
+          - entity: binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2
+            name: Water Tank Removed
+          - entity: sensor.humidifier_puh_9105_puh_2709_error_2
+            name: Error Code
+
+          - type: divider
+
+          - entity: input_text.humidifier_zap_consumption_rates
+            name: Calibrated Rates (ml/h)
+            icon: mdi:tune-vertical
+          - entity: input_datetime.humidifier_zap_cycle_start
+            name: Cycle Start
+            icon: mdi:timer-outline
+          - entity: input_number.humidifier_zap_calibration_cycles
+            name: Calibration Cycles
+
+  - title: Eva
+    path: eva
+    type: sidebar
+    cards:
+      # ----------------------------------------------------------------------
+      # Секция 1: График (Plotly)
+      # ----------------------------------------------------------------------
+      - type: custom:plotly-graph
+        # ENTITIES FIRST — $fn stores vars that layout reads
+        entities:
+          # 1. Current Humidity (y1) — stores min/max in vars
+          - entity: sensor.sensor_eva_humidity
+            name: Humidity
+            yaxis: y
+            filters:
+              - median:
+                  window_size: 5
+                  extended: true
+              - exponential_moving_average:
+                  alpha: 0.06
+              - sliding_window_moving_average:
+                  window_size: 5
+                  extended: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.hum_min = Math.min(...nums);
+                      vars.hum_max = Math.max(...nums);
+                    } else {
+                      vars.hum_min = 35;
+                      vars.hum_max = 50;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#2196F3'
+              width: 2
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
+          # 2. Error (y2) — stores min/max in vars
+          - entity: sensor.humidity_error
+            name: Error
+            yaxis: y2
+            filters:
+              - median:
+                  window_size: 3
+                  extended: true
+              - exponential_moving_average:
+                  alpha: 0.10
+              - sliding_window_moving_average:
+                  window_size: 5
+                  extended: true
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.err_min = Math.min(...nums);
+                      vars.err_max = Math.max(...nums);
+                    } else {
+                      vars.err_min = -5;
+                      vars.err_max = 5;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#F44336'
+              width: 1
+              shape: spline
+              smoothing: 1
+            connectgaps: true
+            showlegend: true
+
+          # 3. Intensity (y3) — step line
+          - entity: number.humidifier_puh_9105_puh_2709_intensity
+            name: Intensity
+            yaxis: y3
+            line:
+              color: '#AB47BC'
+              width: 2
+              shape: hv
+            connectgaps: true
+            showlegend: true
+
+        # LAYOUT — reads vars set by entities above
+        layout:
+          height: 600
+          shapes:
+            # ±0.5% deadband zone around effective target
+            - type: rect
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) - 0.5
+              y1: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) + 0.5
+              fillcolor: rgba(255, 152, 0, 0.08)
+              line:
+                width: 0
+              layer: below
+            # Target humidity line on y1
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y
+              y0: $ex parseFloat(hass.states['sensor.target_humidity']?.state) || 35
+              y1: $ex parseFloat(hass.states['sensor.target_humidity']?.state) || 35
+              line:
+                color: '#FF9800'
+                width: 2
+                dash: dot
+            # Zero error line on y2
+            - type: line
+              xref: paper
+              x0: 0
+              x1: 1
+              yref: y2
+              y0: 0
+              y1: 0
+              line:
+                color: '#ffffff'
+                width: 1
+                dash: dash
+          xaxis:
+            rangeselector:
+              "y": 1.1
+              buttons:
+                - count: 1
+                  label: 15m
+                  step: minute
+                  stepmode: backward
+                - count: 6
+                  label: 6h
+                  step: hour
+                  stepmode: backward
+                - count: 12
+                  label: 12h
+                  step: hour
+                  stepmode: backward
+                - count: 24
+                  label: 24h
+                  step: hour
+                  stepmode: backward
+
+          # y1: Humidity (%) — effective target всегда посередине, симметричный zoom
+          #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
+          yaxis:
+            title: Humidity (%)
+            side: left
+            fixedrange: true
+            autorange: false
+            range: |-
+              $fn ({vars, hass}) => {
+                const target = parseFloat(hass.states['sensor.target_humidity']?.state) || 35;
+                const hMin = vars.hum_min ?? target;
+                const hMax = vars.hum_max ?? target;
+                const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 1.5);
+                const padded = maxDev * 1.15;
+                return [target - padded, target + padded];
+              }
+
+          # y2: Error (%) — 0 всегда посередине = визуально совпадает с target на y1
+          yaxis2:
+            title: Error (%)
+            side: right
+            overlaying: "y"
+            showgrid: false
+            fixedrange: true
+            range: |-
+              $fn ({vars}) => {
+                const eMin = vars.err_min ?? -5;
+                const eMax = vars.err_max ?? 5;
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1);
+                const padded = maxErr * 1.15;
+                return [-padded, padded];
+              }
+
+          # y3: Intensity (0-7) — hidden axis
+          yaxis3:
+            visible: false
+            overlaying: "y"
+            fixedrange: true
+            range: [-0.5, 8]
+
+        defaults:
+          xaxes:
+            fixedrange: true
+          yaxes:
+            fixedrange: true
+
+        time_offset: 5m
+        hours_to_show: 0.25
+        refresh_interval: 10
+        autorange_after_scroll: false
+        disable_pinch_to_zoom: true
+
+      # ----------------------------------------------------------------------
+      # Секция 2: Gauges (sidebar)
+      # ----------------------------------------------------------------------
+      - type: grid
+        columns: 3
+        square: false
+        view_layout:
+          position: sidebar
+        cards:
+          - type: gauge
+            entity: sensor.humidity_filtered
+            name: Current
+            min: 0
+            max: 100
+            segments:
+              - from: 0
+                color: '#db4437'
+              - from: 20
+                color: '#f4b400'
+              - from: 30
+                color: '#43a047'
+              - from: 60
+                color: '#f4b400'
+              - from: 70
+                color: '#db4437'
+            needle: true
+
+          - type: gauge
+            entity: sensor.target_humidity
             name: Target
             min: 0
             max: 100
@@ -230,10 +596,31 @@ views:
             needle: true
 
       # ----------------------------------------------------------------------
-      # Секция 3: Diagnostics
+      # Секция 3: Controls (sidebar)
       # ----------------------------------------------------------------------
       - type: entities
-        title: Diagnostics
+        title: Eva Controls
+        show_header_toggle: false
+        state_color: true
+        view_layout:
+          position: sidebar
+        entities:
+          - entity: automation.humidity_control_main
+            name: Auto Control
+          - entity: input_boolean.humidity_adaptive_target
+            name: Adaptive Target
+          - entity: input_number.humidity_target
+            name: Target Humidity
+          - entity: sensor.target_humidity
+            name: Effective Target
+          - entity: sensor.adaptive_target_humidity
+            name: Adaptive Formula
+
+      # ----------------------------------------------------------------------
+      # Секция 4: Diagnostics (sidebar)
+      # ----------------------------------------------------------------------
+      - type: entities
+        title: Eva Diagnostics
         show_header_toggle: false
         state_color: true
         view_layout:
@@ -245,20 +632,32 @@ views:
             attribute: temperature
             name: Outdoor Temp
             icon: mdi:thermometer
-          
+
           - type: divider
-          
+
+          - entity: sensor.humidity_filtered
+            name: Filtered Humidity
+          - entity: sensor.sensor_eva_humidity
+            name: Raw Humidity
+          - entity: sensor.humidity_slope
+            name: Slope (5m)
           - entity: sensor.humidity_error
             name: Error
+          - entity: sensor.humidity_rate
+            name: Rate
           - entity: sensor.recommended_intensity
             name: Recommended Intensity
             icon: mdi:gauge
           - entity: number.humidifier_puh_9105_puh_2709_intensity
             name: Intensity
             icon: mdi:fan
+          - entity: switch.humidifier_puh_9105_puh_2709_power
+            name: Power
+          - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
+            name: Device Mode
 
           - type: divider
-          
+
           - entity: sensor.humidifier_water_level
             name: Water Level
             icon: mdi:water-percent
@@ -268,15 +667,12 @@ views:
             name: Time Remaining (h)
             icon: mdi:clock-outline
             suffix: h
+          - entity: input_boolean.humidifier_needs_refill
+            name: Needs Refill
           - entity: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
-            name: Water Tank Empty
+            name: Water Tank Removed
           - entity: sensor.humidifier_puh_9105_puh_2709_error
             name: Error Code
-          
-          - type: divider
-          
-          - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
-            name: Device Mode
 
           - type: divider
 

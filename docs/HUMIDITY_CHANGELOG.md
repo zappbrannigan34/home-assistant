@@ -7,6 +7,190 @@
 
 ---
 
+## v4.4.2 (2026-11-22)
+
+**Version:** 4.4.2
+
+### Изменения: режим максимальной незаметности и блокировки локального управления (`Stealth & HA-Only Lockdown`), фиксация аппаратных отличий `devtype 70` vs `devtype 17`
+
+1. **Принудительное отключение индикации/звука и 24/7 блокировка локальных кнопок (`packages/humidity/humidity_control.yaml`):**
+   - В `script.humidity_apply_area_control` снято исключение `supports_child_lock` для `devtype 17` (`zap`): теперь `child_lock: on`, `backlight: off` и `sound: off` удерживаются **на обоих увлажнителях** (`devtype 70` и `devtype 17`) во всех фазах — при холодном старте (сразу после `switch.turn_on`, до 3-секундной задержки), во время работы, перед выключением (строго **до** `switch.turn_off(power_ent)`, не нарушая чистое выключение без команд после `mode = "0"`) и в установившемся `Standby` (`age > 15s`).
+   - В ветке `tank_replaced` (`humidity_refill_detected`, `humidity_zap_refill_detected`) перед 15-секундной пробой безусловно отправляются `sound/backlight = off` и `child_lock = on`.
+2. **Полноценный сторож отклонений (`humidity_mode_enforcer`, `humidity_zap_mode_enforcer`):**
+   - Расширен набор триггеров: помимо `mode`, `humidity` и `warm_stream`, отслеживаются `ioniser: off`, `child_lock: off` (`10s`), `backlight: on` (`10s`), `sound: on` (`10s`), ручное изменение `intensity` (`32s`) и неожиданное локальное `on`/`off` (`25s`/`15s`).
+   - В условиях добавлена блокировка на время активной 15-секундной пробы заправки (`refill_detected.current == 0`) и удержание `child_lock: on` / `backlight: off` / `sound: off` даже при `Standby` с пустым баком.
+3. **Документирование аппаратных ревизий и протокола (`packages/humidity/README.md`, `AI_GUIDELINES.md`):**
+   - Зафиксирована сравнительная спецификация `eva` (`devtype 70`, `MCU 1.0.9`) vs `zap` (`devtype 17`, `MCU 1.0.3`), таблица соответствия программ `polaris-mqtt` (0–7), поведение дисплея/подсветки/встроенного гигрометра и известные баги `polaris-mqtt v1.1.6`.
+
+---
+
+## v4.4.1 (2026-11-21)
+
+**Version:** 4.4.1
+
+### Изменения: полностью автоматическая заправка (zero-touch) и защита калибровки от раннего долива
+
+1. **Автоматическое обнаружение заправки без кнопок и ручного включения (`packages/humidity/humidity_control.yaml`):**
+   - В `humidity_refill_detected` (`eva`) и `humidity_zap_refill_detected` (`zap`) добавлен основной триггер `tank_replaced` (`binary_sensor.*_water_tank`: `on → off`, работает в т.ч. в Standby), с фильтром `dur >= 10 and (not nr_on or since_empty > 2 or dur > 75)`, исключающим 55-секундный Standby-артефакт Polaris.
+   - После установки бака автоматически выполняется **тихая 15-секундная закрытая проба**: включается питание, приглушаются `sound` и `backlight` (если были включены), через `15 с` проверяются `humidifier == 'on'`, нормальный код ошибки (`['00', 'no_error', '02', 'child_lock']`) и `water_tank == 'off'`; при успехе неблокирующе вызывается `script.turn_on` на `script.humidifier_eva_confirm_refill` / `script.humidifier_zap_confirm_refill`, при неудаче питание выключается. Триггер `power_on_20s` сохранён как fallback.
+   - В `script.humidity_apply_area_control` переменная `refill_probe_grace` дополнена проверкой `probe_running` (`(state_attr(refill_auto, 'current') | int(0)) > 0`), исключая преждевременное отключение во время 15-секундной пробы.
+
+2. **Защита автокалибровки от раннего снятия бака (`humidifier_calibrate_rates`, `humidifier_zap_calibrate_rates`):**
+   - Режим изменён на `mode: restart`, добавлена проверка нормального `trigger.from_state.state` (`['00', 'no_error', '02', 'child_lock']`), снимок счётчиков `h1..h7` захватывается в `variables:` до ожидания, затем выполняется `delay: "00:03:00"` с повторной проверкой `needs_refill == 'on'` и `water_tank == 'off'` перед записью новых ставок и сбросом `full_cycle_valid`.
+
+3. **Очистка UI и текстов уведомлений (`dashboards/humidity_dashboard.yaml`, `packages/humidity/humidity_control.yaml`):**
+   - Удалены ручные кнопки **«Refill Tank (100%) / Заправлен»** из `Zap Controls` и `Eva Controls`.
+   - Тексты предупреждения `<= 15%` (`humidity_water_low_warning`) и ошибки `low_water` (`humidity_device_error`, `humidity_zap_device_error`) обновлены с указанием на полностью автоматическое возобновление работы.
+
+---
+
+## v4.4.0 (2026-11-21)
+
+**Version:** 4.4.0
+
+### Изменения: надёжные уведомления, честный `0%` пустого бака, верхний долив и защита калибровки
+
+1. **Отказоустойчивые уведомления и ранний порог 15% (`packages/humidity/humidity_control.yaml`):**
+   - Добавлен `script.humidity_send_notification`: отправка в Telegram (`continue_on_error: true`) с автоматическим fallback на `notify.mobile_app_zapphone`, если `notify.telegram_bot_8110302509_1002699581686` недоступен.
+   - Добавлены helpers `input_boolean.humidifier_low_water_warned` / `humidifier_zap_low_water_warned` (без `initial:`) и автоматизация `humidity_water_low_warning`, отправляющая одно предупреждение за цикл при падении уровня `<= 15%`.
+   - Ошибки устройств (`humidity_device_error`, `humidity_zap_device_error`) переведены на `script.humidity_send_notification` и сглаженную влажность `sensor.humidity_*_filtered`.
+
+2. **Исправление ложной «заправки» через 55 с и поддержка верхнего долива:**
+   - Удалён сломанный триггер `binary_sensor.*_water_tank` (`on → off` `> 30s`), который ложно срабатывал в Standby при автосбросе ошибки прошивкой Polaris.
+   - При `needs_refill == 'on'` или ошибке `low_water`/`01` сенсоры `sensor.humidifier_water_level` и `sensor.humidifier_zap_water_level` принудительно показывают **`0%`** (`remaining_ml: 0`, `hours_remaining: 0.0`).
+   - Добавлены скрипты `script.humidifier_confirm_refill`, `script.humidifier_eva_confirm_refill`, `script.humidifier_zap_confirm_refill` (event `humidity_refill_reset`) и кнопки **«Refill Tank (100%) / Заправлен»** в `Zap Controls` и `Eva Controls` ([dashboards/humidity_dashboard.yaml](dashboards/humidity_dashboard.yaml)) + автоматизация синхронизации ручного тумблера `humidity_manual_refill_toggle`.
+   - `humidity_refill_detected` / `humidity_zap_refill_detected` переведены на автоподхват по **20 с работы** после физического включения увлажнителя без `low_water`, с 30-секундным окном `refill_probe_grace` в `script.humidity_apply_area_control`.
+
+3. **Защита автокалибровки объёма и сброс завышенных ставок `zap`:**
+   - Добавлен флаг полного цикла `input_boolean.humidifier_full_cycle_valid` / `humidifier_zap_full_cycle_valid`: калибровка запускается только при полном цикле в диапазоне расхода `3000..7500 мл`, коэффициент коррекции зажат в `[0.70, 1.35]`, а ставки per-level — в физические границы `[max(35.0, nom*0.60), nom*1.15]` (атрибут `cycle_start` вынесен в момент подтверждения заправки).
+   - Сбитые ставки `zap` (`660.9 мл/ч` на 7-й скорости) сброшены к базовой шкале `70..480 мл/ч` (`calibration_cycles: 1`).
+
+---
+
+## v4.3.0 (2026-11-20)
+
+**Version:** 4.3.0
+
+### Изменения: сглаживание сигнала влажности и графиков (по аналогии с CO₂)
+
+1. **Серверная фильтрация (`packages/humidity/humidity_control.yaml`):**
+   - Добавлены `platform: filter` (`lowpass`, `time_constant: 18`, `precision: 2` — $\tau \approx 3\text{ мин}$ на 10.5-секундной сетке WirenBoard) и `platform: derivative` (`time_window: 00:05:00`) для обеих комнат:
+     - `eva`: `sensor.humidity_filtered`, `sensor.humidity_slope`;
+     - `zap`: `sensor.humidity_zap_filtered`, `sensor.humidity_zap_slope`.
+   - `sensor.humidity_rate` / `sensor.humidity_zap_rate` переведены на расчёт по сглаженной влажности с диагностическими атрибутами `raw_humidity`, `filtered_humidity`, `derivative_slope_5m`, `filter_type: "ema_lowpass"`.
+   - `sensor.humidity_error` / `sensor.humidity_zap_error` триггерятся от сглаженных сенсоров и считают ошибку с точностью `0.01%` (`round(2)`), устраняя ступенчатую «пилу» `±0.1%`, с атрибутами `raw_humidity`, `filtered_humidity`, `target_humidity`, `error_source: "filtered_humidity_error"`.
+   - `sensor.recommended_intensity` / `sensor.humidity_zap_recommended_intensity` дополнены атрибутами `raw_humidity` и `filtered_humidity`, `predicted_error` и `overshoot_pct` округлены до `round(2)`.
+
+2. **Дашборд и графики (`dashboards/humidity_dashboard.yaml`, вкладки `Zap` и `Eva`):**
+   - На графиках `custom:plotly-graph` для кривых `Humidity` и `Error` применён многоступенчатый конвейер сглаживания: `median` (`window_size: 5` / `3`, `extended: true`) → `exponential_moving_average` (`alpha: 0.06` / `0.10`) → `sliding_window_moving_average` (`window_size: 5`, `extended: true`).
+   - Gauge-виджет `Current` в обеих комнатах переведён на `sensor.humidity_zap_filtered` и `sensor.humidity_filtered`.
+   - В панели `Zap Diagnostics` и `Eva Diagnostics` добавлены строки `Filtered Humidity`, `Raw Humidity` и `Slope (5m)`.
+
+---
+
+## v4.2.1 – REMOVE CYCLIC DESYNC LOOP, DEVTYPE 17 CHILD LOCK FIX & HARDWARE/PROTOCOL AUDIT (2026-11-20)
+
+**Version:** 4.2.1
+
+### Уточнение причины инцидента в комнате `zap` (`devtype 17`, `mcu_firmware 1.0.3`)
+
+1. **Самоиндуцированное циклическое включение (`Case 2` из `v4.2.0`):**
+   - Ветка `desync_needed` (`turn_on` → `3s` → `turn_off` каждые >180 с при перелёте `error <= -1.5%` и росте `rate >= 0.08%/мин`) сама кратковременно включала увлажнитель в режим `auto` (`23:47:57`, `23:51:47`, `23:55:00`, `23:58:16` UTC), вызывая щелчок реле.
+2. **Неподдерживаемый `child_lock` для `devtype 17` (`mcu 1.0.3`):**
+   - Официальный профиль Polaris `polaris_devices/devices-74B733E1-9775-4715-BDCC-D9A14B298AB2.json` (`type 17`) в отличие от `type 70` (`eva`, `mcu 1.0.9`) **не содержит** `child_lock` и имеет 1 счётчик `expendables` (`4392`, текущее значение `[2417]` = 1 975 ч наработки). Автоматизация принудительно слала `control/child_lock = "true"`, блокируя кнопку `ON/OFF` на панели.
+3. **Протокол Syncleo/MQTT и электрика `PUH-9105`:**
+   - Во всех реализациях (`samoswall/polaris-mqtt`, `DeKaN/ha-syncleo`, `pysyncleo`, `samoswall/Syncleo`) и в схемах Polaris `type 17`/`type 70` выключение — строго `control/mode = "0"` (`CmdMode(0)`), режима просушки/додува не существует.
+   - При `state/mode = "0"` устройство отключает ТЭН тёплого пара (реле 220 В, 80 Вт — слышимый щелчок), но если 24 В силовой ключ (MOSFET/транзистор) ультразвуковой мембраны и вентилятора (30 Вт) пробит или замкнут, генерация тумана продолжается при `Standby` (`mode = 0`).
+
+### Изменения
+
+- Полностью удалена ветка `Case 2` (`turn_on → 3s → turn_off`) из `script.humidity_apply_area_control`.
+- При выключении заранее гасятся `warm_stream`/`ioniser`, для питания (`turn_on`/`turn_off`) используются **только `switch.turn_off` / `switch.turn_on`** (`power_ent` — тот же MQTT-топик `control/mode`, без вызова `humidifier.turn_off`, т.к. `polaris/humidifier.py:207` присваивает `self._attr_is_on = "0"` [truthy строка → ложный `'on'` при повторном off]), а для `devtype == '17'` принудительно снимается и больше не включается `child_lock` (также в `humidity_mode_enforcer` и `humidity_zap_mode_enforcer`).
+- В `dev_is_on` добавлена проверка `intensity > 0`.
+
+---
+
+## v4.2 – SINGLE-WRITER SHUTDOWN, MCU DESYNC FIX & POLLING POWER RELIABILITY (2026-11-20)
+
+**Version:** 4.2.0
+
+### Причина инцидента («интенсивность 0 / реле щёлкает / пар не останавливается»)
+
+1. **Гонка `mode_enforcer` vs `control_main` + зависание MCU Polaris (`zap`, `devtype 17`, `mcu 1.0.3`):**
+   - `switch.*_power` и `humidifier.*` в `polaris-mqtt` используют один топик `control/mode`.
+   - При выключении (`control/mode = "0"`) прошивка за ~270 мс до `state/mode = "0"` кратковременно публикует переходный пакет `mode: boost`, `humidity: 30`, `warm_stream: false`.
+   - `humidity_zap_mode_enforcer` без дебаунса и проверки `recommended >= 1` ловил этот переход, возвращал `mode: home` и спустя 1.2 с после выключения отправлял в уже выключенный контроллер пачку команд (`control/humidity = 75`, `control/warm_stream = true`, `control/intensity = 0`).
+   - Из-за этого отключался ТЭН тёплого пара (щелчок реле, `state/mode = "0"`, `intensity = 0` на дашборде), но ультразвуковая мембрана и вентилятор в MCU зависали включёнными.
+2. **Блокировка выключения в `eva` (`needs_refill`) и баг `polaris/switch.py`:**
+   - В `script.humidity_apply_area_control` проверка `needs_refill == 'off'` стояла на внешнем `if` и блокировала даже команду выключения (`recommended == 0`).
+   - В `polaris/switch.py` строка 850 не распознаёт режимы `"6"` (`home`) и `"7"` (`eco`), из-за чего `switch.*_power` оставался в `unknown`/`off`.
+
+### Изменения
+
+- **Однописательная схема по комнатам (`mode: queued`, `max: 2`):** `humidity_mode_enforcer` / `humidity_zap_mode_enforcer` переведены на триггеры `mode`/`humidity`/`warm_stream` с дебаунсом **`for: 15s`**, обязательным условием `recommended >= 1` + `is_state(hum, 'on')` и вызовом `automation.trigger` для `control_main` (без параллельного запуска отдельного скрипта).
+- **`humidifier.*` как первичный источник питания:** во всех сенсорах (`recommended_intensity`, `water_consumed`) и скриптах используется `is_state(hum, 'on') or is_state(pwr, 'on')`; `humidifier.*` добавлен в trigger'ы template-сенсоров.
+- **Безусловное чистое выключение и анти-desync (`script.humidity_apply_area_control`):**
+  - При `recommended == 0` или неактивном `can_run` отправляется только `switch.turn_off` (+ `wait_template` 5 с и fallback `humidifier.turn_off`), никогда не отправляются `set_mode`, `set_humidity`, `warm_stream` или `intensity: 0`.
+  - Если `dev_is_on == false`, `recommended == 0`, `can_run == true`, `error <= -1.5%`, `rate >= 0.08%/min` и `hum_ent` в `off` > 180 с — выполняется одиночный чистый UART-ресинк (`turn_on` → `3s` → `turn_off`).
+  - При холодном старте через 3 с перепроверяется `recommended`: если цель уже снизилась до `0`, устройство тут же чисто выключается.
+- **`script.humidity_setup_area_devices` и `script.humidity_enforce_area_mode`:** устранено безусловное включение при старте HA, вся работа делегирована в `script.humidity_apply_area_control`.
+
+---
+
+## v4.1 – TIGHT ±0.5% PI+D CONTROLLER & WARM STEAM ENFORCEMENT (2026-11-20)
+
+**Version:** 4.1.0
+
+### Изменения
+
+#### 1. Плотный PI+D-контроллер удержания цели (`±0.5%` вместо `±2.0%`)
+
+- Убрана зона «заморозки» (`current <= 2` внутри `±2.0%`), ограничение разгона `+3` и затянутое отключение до `-4.0%`.
+- Введена самоподстраивающаяся интегральная составляющая `integral_level` (`0.0..7.0` по фактическому `dt`):
+  - при `error > +1.5%` или `predicted_error > +1.5%` сразу выдаётся **`7`**;
+  - при `error ≤ -1.0%` (или `-0.5%` с прогнозом `≤ -1.2%`) сразу выдаётся **`0`**;
+  - в полосе `-1.0% .. +1.5%` интенсивность рассчитывается непрерывно (`integral_level + 1.8·error - 3.5·rate`, мин. `1` при `error > +0.5%`).
+- Обновлена подсветка зоны нечувствительности на графиках в `dashboards/humidity_dashboard.yaml`: `±0.5%`, fallback `35`.
+
+#### 2. Принудительный возврат `warm_stream` и вспомогательных свитчей
+
+- Устранена потеря ~30% производительности из-за сброса `warm_stream` прошивкой Polaris при цикле питания `off → on`: `script.humidity_apply_area_control`, `script.humidity_enforce_area_mode` и `humidity_*_mode_enforcer` проверяют и включают `warm_stream`, `ioniser`, `child_lock` (и выключают `sound`, `backlight`) на всех активных увлажнителях комнаты.
+
+#### 3. Отмена конденсатного урезания и расширение уставки
+
+- Убрано урезание адаптивной цели по `outdoor_limit` (оставлена комнатная кривая `35–60%`), `min` у `input_number.humidity_target` и `input_number.humidity_zap_target` снижен с `30` до `25%`.
+
+---
+
+## v4.0 – MULTI-ROOM AREA CONTROL & PERSISTENT MANUAL TARGET (2026-11-20)
+
+**Version:** 4.0.0
+
+### Изменения
+
+#### 1. Многокомнатная и много-устройственная архитектура по `area` (`zap` + `eva`)
+
+- Добавлен полный независимый контур управления для комнаты **`zap`** (`sensor.humidity_zap_*`, `automation.humidity_zap_*`, `input_*_zap_*`, `humidifier.humidifier_puh_9105_puh_2709_humidifier_2`), при сохранении всех legacy entity IDs комнаты **`eva`**.
+- Логика инициализации, контроля режима `home` и управления питанием/интенсивностью вынесена в переиспользуемые скрипты `script.humidity_setup_area_devices`, `script.humidity_enforce_area_mode`, `script.humidity_apply_area_control`, которые динамически обходят все устройства с доменом `humidifier.*` в `area_devices(area_name)`.
+- `Recommended Intensity` (`eva` и `zap`) также определяет текущую активную интенсивность по всем включённым увлажнителям комнаты через `area_devices(...)`.
+- Учтена особенность `polaris-mqtt` после рестарта в режиме `home` (`6`): если `switch.*_power` временно `unknown`, состояние питания безопасно определяется по `humidifier.*`.
+
+#### 2. Ручное задание целевой влажности с сохранением между перезагрузками
+
+- Добавлены персистентные helpers **без `initial:`** для обеих комнат:
+  - `input_boolean.humidity_adaptive_target` / `input_boolean.humidity_zap_adaptive_target`
+  - `input_number.humidity_target` / `input_number.humidity_zap_target` (30–70%)
+- Добавлены сенсоры действующей цели `sensor.target_humidity` (`eva`) и `sensor.humidity_zap_target_humidity` (`zap`).
+- Добавлена автоматизация `automation.humidity_manual_target_autoswitch`, автоматически выключающая адаптивный режим при ручном вводе значения в дашборде.
+- Удалён `initial: 5000` у `input_number.humidifier_tank_capacity_ml` и синхронизирована live стейт-машина заправки (`humidifier_needs_refill` + `humidity_refill_detected` + фикс HA bug `#105309`).
+
+#### 3. Многокомнатный дашборд (`dashboards/humidity_dashboard.yaml`)
+
+- Дашборд разделён на две вкладки в стиле `sidebar` (по аналогии с `ventilation_dashboard.yaml`): **`Zap`** и **`Eva`**.
+- Для каждой комнаты добавлена панель `Controls` (переключатель `Auto Control`, `Adaptive Target`, ручной ввод `Target Humidity`, `Effective Target`, `Adaptive Formula`), графики Plotly центрируются на действующей цели и отображают зону нечувствительности `±2.0%`.
+
+---
+
 ## v3.1 – PER-LEVEL CONSUMPTION RATE CALIBRATION (2026-01-29)
 
 **Version:** 3.1.0

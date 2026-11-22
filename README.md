@@ -9,7 +9,7 @@
 
 | Пакет | Описание | Документация |
 |-------|----------|--------------|
-| `humidity` | Управление увлажнителем Polaris PUH‑9105 (адаптивная цель по влажности, режимы AUTO/MANUAL). | [`packages/humidity/README.md`](packages/humidity/README.md) |
+| `humidity` | Многокомнатное (`zap` + `eva`) управление увлажнителями Polaris PUH‑9105/PUH‑2709 по `area_devices`, адаптивная или персистентная ручная цель влажности. | [`packages/humidity/README.md`](packages/humidity/README.md) |
 | `ventilation` | ZAP cycle-identified PI с 10-минутным forecast, thermal cap и отдельным 30-минутным actuator gate; EVA сохраняет существующий controller. | [`packages/ventilation/README.md`](packages/ventilation/README.md) |
 
 > Новые пакеты добавляются в каталог `packages/` и в эту таблицу.
