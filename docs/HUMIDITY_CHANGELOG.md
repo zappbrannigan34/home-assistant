@@ -7,6 +7,23 @@
 
 ---
 
+## v4.4.3 (2026-11-23)
+
+**Version:** 4.4.3
+
+### Изменения: полное гашение экрана и кнопок через `mode: "sleep"` (`4`) + гистерезис включения
+
+1. **Перевод рабочего режима с `home` (`6`) на `sleep` (`4`, `Ночной режим`) (`packages/humidity/humidity_control.yaml`):**
+   - По официальной документации `PUH-9105` (стр. 9, 11, 20) и живому фотоподтверждению `backlight = false` (`0x1C`) гасит **только подсветку водяного бака**; в режиме `home` (`6`) цифровой экран и 6 сенсорных кнопок через 15 с лишь приглушаются. Единственный рабочий режим с полным гашением экрана и кнопок через 15 с тишины — `mode: "sleep"` (`4`).
+   - Живой проверкой через MQTT на обеих ревизиях (`eva` `devtype 70 / MCU 1.0.9` и `zap` `devtype 17 / MCU 1.0.3`) подтверждено, что в `mode = "4"` (`sleep`) сохраняются `warm_stream: true`, `ioniser: true`, `child_lock: true`, `backlight: false`, `sound: false`, а `number.set_value(intensity)` игнорируется (`state/intensity = "0"`).
+   - `script.humidity_apply_area_control`, `humidity_mode_enforcer`, `humidity_zap_mode_enforcer` и проба `tank_replaced` в `humidity_*_refill_detected` переведены на `mode: "sleep"` без отправки лишних `set_humidity` и `number.set_value(intensity)` (чтобы не будить экран).
+2. **Устранение 10-секундного дребезга `on ↔ off` (`sensor.recommended_intensity`, `sensor.humidity_zap_recommended_intensity`):**
+   - Добавлен гистерезис включения (`not has_on and error < 0.25 and predicted_error < 0.45 → 0`) и ускоренная разрядка `integral_level` при простое в перелёте (`0.60 * error * dt`), что исключило цикличное включение/выключение каждые 10 с около уставки и пробуждение дисплея.
+3. **Учёт воды и full-cycle калибровка в режиме `sleep` (`water_consumed`, `hours_remaining`, `calibrate_rates`):**
+   - При `power_on` и `state/intensity == "0"` (`sleep`) расход и `hours_remaining` считаются по откалиброванной ставке уровня `6`, а `humidifier_*_calibrate_rates` при `total_hrs < 0.5` масштабирует всю таблицу `1..7` по факту полного цикла (`5000 мл / model_consumed`).
+
+---
+
 ## v4.4.2 (2026-11-22)
 
 **Version:** 4.4.2
