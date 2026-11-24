@@ -1,5 +1,5 @@
 # package: notifications_control
-# Version: 1.0.1
+# Version: 1.0.2
 # Last Updated: 2026-11-24
 # Purpose: Единый диспетчер уведомлений (P0-P3), аварийный контур протечек,
 #          watchdog отвала датчиков/Z2M и утренний дайджест обслуживания (10:00).
@@ -89,6 +89,13 @@ template:
       - platform: state
         entity_id:
           - input_number.notifications_battery_low_threshold
+          - binary_sensor.leak_bath_water_leak
+          - binary_sensor.leak_bathroom_motors_water_leak
+          - binary_sensor.leak_filters_water_leak
+          - binary_sensor.leak_kitchen_water_leak
+          - binary_sensor.leak_toilet_water_leak
+          - binary_sensor.leak_toilet_zap_water_leak
+          - binary_sensor.leak_washer_water_leak
       - platform: homeassistant
         event: start
     sensor:
@@ -744,31 +751,29 @@ automation:
           resolved_message: "Все датчики протечки сухие ({{ now().strftime('%H:%M') }}). Краны ХВС/ГВС оставлены перекрытыми до ручной проверки."
           clear_mobile: true
 
-  # 5. Сторожевой таймер отвала датчиков протечки (с Dependency Gating по Z2M и Restart Guard)
+  # 5. Сторожевой таймер отвала датчиков протечки (с Dependency Gating по Z2M и выдержкой 65 мин)
   - id: "Мониторинг: отвал датчиков протечки (>10 мин)"
     alias: leak_sensors_offline_watchdog
-    description: "Предупреждает об исчезновении датчиков протечки из сети (unavailable/unknown) при живом Zigbee2MQTT."
+    description: "Предупреждает об исчезновении датчиков протечки из сети (>65 мин с учётом ~50-мин интервала Aqara) при живом Zigbee2MQTT."
     mode: restart
     triggers:
       - trigger: state
         entity_id: sensor.notifications_offline_leak_sensors
         attribute: signature
         for:
-          minutes: 10
+          minutes: 65
         id: sig_change
-      - trigger: homeassistant
-        event: start
-        id: ha_start
+      - trigger: state
+        entity_id: sensor.notifications_offline_leak_sensors
+        to: "0"
+        for:
+          minutes: 2
+        id: all_online
     conditions:
       - condition: state
         entity_id: binary_sensor.zigbee2mqtt_bridge_connection_state
         state: "on"
     actions:
-      - if:
-          - condition: template
-            value_template: "{{ trigger.id == 'ha_start' }}"
-        then:
-          - delay: "00:03:00"
       - variables:
           cur_sig: "{{ state_attr('sensor.notifications_offline_leak_sensors', 'signature') | default('', true) }}"
           prev_sig: "{{ states('input_text.leak_offline_notified_signature') | default('', true) }}"
@@ -776,7 +781,7 @@ automation:
       - choose:
           - conditions:
               - condition: template
-                value_template: "{{ cur_sig != '' and cur_sig != prev_sig }}"
+                value_template: "{{ trigger.id == 'sig_change' and cur_sig != '' and cur_sig != prev_sig }}"
             sequence:
               - action: input_text.set_value
                 target:
@@ -787,7 +792,7 @@ automation:
                 data:
                   level: p1_urgent
                   title: "⚠️ Потеряны датчики протечки ({{ off_items | length }} из 7)"
-                  message: "Не передают данные >10 мин: {{ off_items | join(', ') }}. Защита этих зон не сработает при протечке!"
+                  message: "Не выходят на связь >65 мин: {{ off_items | join(', ') }}. Защита этих зон не сработает при протечке!"
                   tag: "leak_sensors_offline"
           - conditions:
               - condition: template
