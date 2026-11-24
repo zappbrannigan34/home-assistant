@@ -1,0 +1,896 @@
+# package: notifications_control
+# Version: 1.0.0
+# Last Updated: 2026-11-24
+# Purpose: Единый диспетчер уведомлений (P0-P3), аварийный контур протечек,
+#          watchdog отвала датчиков/Z2M и утренний дайджест обслуживания (10:00).
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT HELPERS (строго без initial:, чтобы состояния переживали рестарты HA)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_boolean:
+  notifications_quiet_hours_enabled:
+    name: "Notifications Quiet Hours Enabled"
+    icon: mdi:weather-night
+
+  notifications_dnd_manual:
+    name: "Notifications Manual DND"
+    icon: mdi:bell-off
+
+  leak_emergency_active:
+    name: "Leak Emergency Active"
+    icon: mdi:water-alert
+
+  leak_emergency_acknowledged:
+    name: "Leak Emergency Acknowledged"
+    icon: mdi:check-circle-outline
+
+  z2m_bridge_offline_warned:
+    name: "Zigbee2MQTT Bridge Offline Warned"
+    icon: mdi:zigbee
+
+input_number:
+  notifications_battery_low_threshold:
+    name: "Notifications Battery Low Threshold"
+    min: 5
+    max: 50
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:battery-low
+
+  notifications_disk_warn_threshold:
+    name: "Notifications Disk Warning Threshold"
+    min: 70
+    max: 98
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:harddisk
+
+input_text:
+  leak_last_telegram_msg_id:
+    name: "Leak Last Telegram Message ID"
+    max: 64
+
+  z2m_last_telegram_msg_id:
+    name: "Z2M Last Telegram Message ID"
+    max: 64
+
+  leak_offline_notified_signature:
+    name: "Leak Offline Notified Signature"
+    max: 255
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  TRIGGER-BASED TEMPLATE SENSORS
+# ──────────────────────────────────────────────────────────────────────────────
+
+template:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: state
+        entity_id:
+          - input_boolean.notifications_quiet_hours_enabled
+          - input_boolean.notifications_dnd_manual
+      - platform: homeassistant
+        event: start
+    binary_sensor:
+      - name: "Notifications Quiet Time"
+        unique_id: notifications_quiet_time
+        icon: mdi:bell-sleep
+        state: >
+          {% set manual_dnd = is_state('input_boolean.notifications_dnd_manual', 'on') %}
+          {% set sched_on = is_state('input_boolean.notifications_quiet_hours_enabled', 'on') %}
+          {% set night = now().hour >= 23 or now().hour < 8 %}
+          {{ manual_dnd or (sched_on and night) }}
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/5"
+      - platform: state
+        entity_id:
+          - input_number.notifications_battery_low_threshold
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Notifications Low Batteries"
+        unique_id: notifications_low_batteries
+        unit_of_measurement: "devices"
+        state_class: measurement
+        icon: mdi:battery-alert
+        state: >
+          {% set thr = states('input_number.notifications_battery_low_threshold') | int(20) %}
+          {% set ns = namespace(items=[], seen=[]) %}
+          {% for s in states.sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'eq', 'battery') %}
+            {% if not s.entity_id.endswith('_battery_plus')
+                  and 'zapphone' not in s.entity_id
+                  and 'masy' not in s.entity_id
+                  and s.state not in ['unavailable', 'unknown', 'none', ''] %}
+              {% set val = s.state | float(100) %}
+              {% if val < thr %}
+                {% set plus_id = s.entity_id ~ '_plus' %}
+                {% set btype = state_attr(plus_id, 'battery_type_and_quantity') or state_attr(plus_id, 'battery_type') %}
+                {% set label = s.name ~ ': ' ~ (val | round(0) | int) ~ '%' ~ (' [' ~ btype ~ ']' if btype else '') %}
+                {% set ns.items = ns.items + [label] %}
+                {% set ns.seen = ns.seen + [s.entity_id] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% for b in states.binary_sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'eq', 'battery') %}
+            {% if b.state == 'on' and not b.entity_id.endswith('_battery_low') %}
+              {% set ns.items = ns.items + [b.name ~ ': LOW'] %}
+            {% elif b.state == 'on' %}
+              {% set pct_id = 'sensor.' ~ b.object_id.replace('_battery_low', '_battery') %}
+              {% if states(pct_id) in ['unavailable', 'unknown', 'none', ''] %}
+                {% set ns.items = ns.items + [b.name ~ ': LOW'] %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.items | length }}
+        attributes:
+          items: >
+            {% set thr = states('input_number.notifications_battery_low_threshold') | int(20) %}
+            {% set ns = namespace(items=[]) %}
+            {% for s in states.sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'battery') %}
+              {% if not s.entity_id.endswith('_battery_plus')
+                    and 'zapphone' not in s.entity_id
+                    and 'masy' not in s.entity_id
+                    and s.state not in ['unavailable', 'unknown', 'none', ''] %}
+                {% set val = s.state | float(100) %}
+                {% if val < thr %}
+                  {% set plus_id = s.entity_id ~ '_plus' %}
+                  {% set btype = state_attr(plus_id, 'battery_type_and_quantity') or state_attr(plus_id, 'battery_type') %}
+                  {% set label = s.name ~ ': ' ~ (val | round(0) | int) ~ '%' ~ (' [' ~ btype ~ ']' if btype else '') %}
+                  {% set ns.items = ns.items + [label] %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {% for b in states.binary_sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'battery') %}
+              {% if b.state == 'on' %}
+                {% set pct_id = 'sensor.' ~ b.object_id.replace('_battery_low', '_battery') %}
+                {% if not b.entity_id.endswith('_battery_low') or states(pct_id) in ['unavailable', 'unknown', 'none', ''] %}
+                  {% set ns.items = ns.items + [b.name ~ ': LOW'] %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+
+      - name: "Notifications Offline Leak Sensors"
+        unique_id: notifications_offline_leak_sensors
+        unit_of_measurement: "sensors"
+        state_class: measurement
+        icon: mdi:pipe-leak
+        state: >
+          {% set sensors = [
+            'binary_sensor.leak_bath_water_leak',
+            'binary_sensor.leak_bathroom_motors_water_leak',
+            'binary_sensor.leak_filters_water_leak',
+            'binary_sensor.leak_kitchen_water_leak',
+            'binary_sensor.leak_toilet_water_leak',
+            'binary_sensor.leak_toilet_zap_water_leak',
+            'binary_sensor.leak_washer_water_leak'
+          ] %}
+          {% set ns = namespace(cnt=0) %}
+          {% for e in sensors %}
+            {% if states(e) in ['unavailable', 'unknown'] %}
+              {% set ns.cnt = ns.cnt + 1 %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.cnt }}
+        attributes:
+          items: >
+            {% set labels = {
+              'binary_sensor.leak_bath_water_leak': 'Ванная',
+              'binary_sensor.leak_bathroom_motors_water_leak': 'Ванная (моторы)',
+              'binary_sensor.leak_filters_water_leak': 'Туалет (фильтры)',
+              'binary_sensor.leak_kitchen_water_leak': 'Кухня',
+              'binary_sensor.leak_toilet_water_leak': 'Ванная (туалет)',
+              'binary_sensor.leak_toilet_zap_water_leak': 'Туалет (стояк zap)',
+              'binary_sensor.leak_washer_water_leak': 'Кухня (стиралка)'
+            } %}
+            {% set ns = namespace(items=[]) %}
+            {% for e, name in labels.items() %}
+              {% if states(e) in ['unavailable', 'unknown'] %}
+                {% set ns.items = ns.items + [name ~ ' (' ~ states(e) ~ ')'] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+          signature: >
+            {% set codes = {
+              'binary_sensor.leak_bath_water_leak': 'bath',
+              'binary_sensor.leak_bathroom_motors_water_leak': 'bmot',
+              'binary_sensor.leak_filters_water_leak': 'filt',
+              'binary_sensor.leak_kitchen_water_leak': 'kitc',
+              'binary_sensor.leak_toilet_water_leak': 'toil',
+              'binary_sensor.leak_toilet_zap_water_leak': 'tzap',
+              'binary_sensor.leak_washer_water_leak': 'wash'
+            } %}
+            {% set ns = namespace(keys=[]) %}
+            {% for e, code in codes.items() %}
+              {% if states(e) in ['unavailable', 'unknown'] %}
+                {% set ns.keys = ns.keys + [code] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.keys | sort | join(',') }}
+
+      - name: "Notifications Offline Zigbee BLE Devices"
+        unique_id: notifications_offline_zigbee_ble_devices
+        unit_of_measurement: "devices"
+        state_class: measurement
+        icon: mdi:access-point-off
+        state: >
+          {% set ns = namespace(items=[]) %}
+          {% for s in states.sensor
+             | selectattr('attributes.device_class', 'defined')
+             | selectattr('attributes.device_class', 'eq', 'battery') %}
+            {% if not s.entity_id.endswith('_battery_plus')
+                  and 'zapphone' not in s.entity_id
+                  and 'masy' not in s.entity_id
+                  and 'leak_' not in s.entity_id
+                  and s.state in ['unavailable', 'unknown'] %}
+              {% set ns.items = ns.items + [s.name] %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.items | length }}
+        attributes:
+          items: >
+            {% set ns = namespace(items=[]) %}
+            {% for s in states.sensor
+               | selectattr('attributes.device_class', 'defined')
+               | selectattr('attributes.device_class', 'eq', 'battery') %}
+              {% if not s.entity_id.endswith('_battery_plus')
+                    and 'zapphone' not in s.entity_id
+                    and 'masy' not in s.entity_id
+                    and 'leak_' not in s.entity_id
+                    and s.state in ['unavailable', 'unknown'] %}
+                {% set ns.items = ns.items + [s.name ~ ' (' ~ s.state ~ ')'] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.items }}
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SCRIPTS (Единый роутер уведомлений и автоочистка)
+# ──────────────────────────────────────────────────────────────────────────────
+
+script:
+  notify_dispatch:
+    alias: "Единый диспетчер уведомлений (P0-P3)"
+    mode: parallel
+    max: 20
+    fields:
+      level:
+        description: "Уровень важности: p0_emergency | p1_urgent | p2_maintenance | p3_info"
+        required: true
+      title:
+        description: "Заголовок сообщения"
+        required: true
+      message:
+        description: "Текст сообщения"
+        required: true
+      tag:
+        description: "Тег для дедупликации и автоочистки"
+        default: ""
+      inline_keyboard:
+        description: "Список кнопок Telegram (опционально)"
+        default: []
+      tts_message:
+        description: "Текст для голосового озвучивания на Яндекс.Станциях (только P0)"
+        default: ""
+      mute_telegram:
+        description: "Принудительно беззвучно в Telegram (для безопасных тестов)"
+        default: false
+    sequence:
+      - variables:
+          lvl: "{{ level | default('p3_info') }}"
+          tg_entity: >-
+            {{ 'notify.telegram_bot_8110302509_1002715853345'
+               if lvl in ['p0_emergency', 'p1_urgent']
+               else 'notify.telegram_bot_8110302509_1002699581686' }}
+          tg_ok: "{{ states(tg_entity) not in ['unavailable', 'unknown', 'none', ''] }}"
+          quiet: "{{ is_state('binary_sensor.notifications_quiet_time', 'on') }}"
+          tg_silent: >-
+            {% if mute_telegram | bool(false) %}
+              true
+            {% elif lvl == 'p0_emergency' %}
+              false
+            {% elif lvl == 'p2_maintenance' %}
+              true
+            {% else %}
+              {{ quiet }}
+            {% endif %}
+          msg_tag: "{{ tag | default('', true) | string }}"
+          has_kbd: "{{ (inline_keyboard | default([]) | length) > 0 }}"
+
+      # 1. Основная отправка в Telegram (при наличии маршрута)
+      - if:
+          - condition: template
+            value_template: "{{ tg_ok }}"
+        then:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ msg_tag != '' and has_kbd }}"
+                sequence:
+                  - action: telegram_bot.send_message
+                    continue_on_error: true
+                    data:
+                      entity_id: "{{ tg_entity }}"
+                      title: "{{ title }}"
+                      message: "{{ message }}"
+                      parse_mode: plain_text
+                      disable_notification: "{{ tg_silent | bool(false) }}"
+                      message_tag: "{{ msg_tag }}"
+                      inline_keyboard: "{{ inline_keyboard }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ msg_tag != '' }}"
+                sequence:
+                  - action: telegram_bot.send_message
+                    continue_on_error: true
+                    data:
+                      entity_id: "{{ tg_entity }}"
+                      title: "{{ title }}"
+                      message: "{{ message }}"
+                      parse_mode: plain_text
+                      disable_notification: "{{ tg_silent | bool(false) }}"
+                      message_tag: "{{ msg_tag }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ has_kbd }}"
+                sequence:
+                  - action: telegram_bot.send_message
+                    continue_on_error: true
+                    data:
+                      entity_id: "{{ tg_entity }}"
+                      title: "{{ title }}"
+                      message: "{{ message }}"
+                      parse_mode: plain_text
+                      disable_notification: "{{ tg_silent | bool(false) }}"
+                      inline_keyboard: "{{ inline_keyboard }}"
+            default:
+              - action: telegram_bot.send_message
+                continue_on_error: true
+                data:
+                  entity_id: "{{ tg_entity }}"
+                  title: "{{ title }}"
+                  message: "{{ message }}"
+                  parse_mode: plain_text
+                  disable_notification: "{{ tg_silent | bool(false) }}"
+
+      # 2. Для P0 — параллельный пробой DND на оба телефона + TTS на Яндекс.Станции
+      - if:
+          - condition: template
+            value_template: "{{ lvl == 'p0_emergency' and not (mute_telegram | bool(false)) }}"
+        then:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+              data:
+                ttl: 0
+                priority: high
+                channel: alarm_stream
+                importance: high
+                persistent: true
+                tag: "{{ msg_tag if msg_tag != '' else 'p0_emergency' }}"
+                actions:
+                  - action: "ACK_LEAK_EMERGENCY"
+                    title: "Подтвердить (Ack)"
+          - action: notify.mobile_app_masy
+            continue_on_error: true
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+              data:
+                ttl: 0
+                priority: high
+                channel: alarm_stream
+                importance: high
+                persistent: true
+                tag: "{{ msg_tag if msg_tag != '' else 'p0_emergency' }}"
+                actions:
+                  - action: "ACK_LEAK_EMERGENCY"
+                    title: "Подтвердить (Ack)"
+          - if:
+              - condition: template
+                value_template: "{{ (tts_message | default('', true) | trim) != '' }}"
+            then:
+              - repeat:
+                  for_each:
+                    - media_player.yandex_station_m10d6y300nzacg
+                    - media_player.yandex_station_m105j4010yy1mk
+                    - media_player.yandex_station_m10shx5007zscb
+                    - media_player.yandex_station_m10m1z500jwy0g
+                  sequence:
+                    - if:
+                        - condition: template
+                          value_template: "{{ states(repeat.item) not in ['unavailable', 'unknown', 'none', ''] }}"
+                      then:
+                        - action: media_player.play_media
+                          continue_on_error: true
+                          target:
+                            entity_id: "{{ repeat.item }}"
+                          data:
+                            media_content_id: "{{ tts_message }}"
+                            media_content_type: text
+
+      # 3. Fallback на mobile_app, если Telegram недоступен (для P1-P3)
+      - if:
+          - condition: template
+            value_template: "{{ not tg_ok and lvl != 'p0_emergency' }}"
+        then:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+              data:
+                tag: "{{ msg_tag if msg_tag != '' else lvl }}"
+          - if:
+              - condition: template
+                value_template: "{{ lvl == 'p1_urgent' }}"
+            then:
+              - action: notify.mobile_app_masy
+                continue_on_error: true
+                data:
+                  title: "{{ title }}"
+                  message: "{{ message }}"
+                  data:
+                    tag: "{{ msg_tag if msg_tag != '' else lvl }}"
+
+  notify_clear:
+    alias: "Очистка пуша на телефонах и обновление статуса в Telegram"
+    mode: parallel
+    max: 10
+    fields:
+      tag:
+        description: "Тег уведомления"
+        required: true
+      telegram_entity:
+        description: "Целевой Telegram notify entity"
+        default: "notify.telegram_bot_8110302509_1002715853345"
+      message_id:
+        description: "ID сообщения в Telegram для редактирования"
+        default: ""
+      resolved_title:
+        description: "Новый заголовок"
+        default: ""
+      resolved_message:
+        description: "Новый текст"
+        default: ""
+      clear_mobile:
+        description: "Снимать ли пуш с телефонов через clear_notification"
+        default: true
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ clear_mobile | bool(true) and (tag | default('', true)) != '' }}"
+        then:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              message: "clear_notification"
+              data:
+                tag: "{{ tag }}"
+          - action: notify.mobile_app_masy
+            continue_on_error: true
+            data:
+              message: "clear_notification"
+              data:
+                tag: "{{ tag }}"
+      - if:
+          - condition: template
+            value_template: >-
+              {{ (message_id | default('', true) | string | trim) not in ['', 'unknown', 'unavailable', 'none']
+                 and (resolved_message | default('', true) | trim) != '' }}
+        then:
+          - action: telegram_bot.edit_message
+            continue_on_error: true
+            data:
+              entity_id: "{{ telegram_entity | default('notify.telegram_bot_8110302509_1002715853345') }}"
+              message_id: "{{ message_id }}"
+              title: "{{ resolved_title }}"
+              message: "{{ resolved_message }}"
+              parse_mode: plain_text
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  AUTOMATIONS
+# ──────────────────────────────────────────────────────────────────────────────
+
+automation:
+  # 1. Захват message_id отправленных сообщений Telegram по message_tag
+  - id: "Уведомления: захват message_id отправленных алертов Telegram"
+    alias: notifications_capture_telegram_sent
+    description: "Сохраняет message_id сообщений Telegram с тегами для последующего edit_message."
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: event
+        event_type: telegram_sent
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.message_tag is defined and trigger.event.data.message_id is defined }}"
+    actions:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.message_tag == 'leak_emergency' }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.leak_last_telegram_msg_id
+                data:
+                  value: "{{ trigger.event.data.message_id | string }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.event.data.message_tag == 'z2m_bridge_offline' }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.z2m_last_telegram_msg_id
+                data:
+                  value: "{{ trigger.event.data.message_id | string }}"
+
+  # 2. Единый аварийный контур протечек (P0) — замена 7 разрозненных автоматизаций
+  - id: "Авария: протечка воды — перекрытие кранов, тревога P0 и повторы"
+    alias: leak_emergency_handler
+    description: "При протечке перекрывает краны ХВС/ГВС, проверяет их закрытие через 15 с, шлёт тревогу P0 с пробоем DND и повторяет до Ack или высыхания."
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id:
+          - binary_sensor.leak_bath_water_leak
+          - binary_sensor.leak_bathroom_motors_water_leak
+          - binary_sensor.leak_filters_water_leak
+          - binary_sensor.leak_kitchen_water_leak
+          - binary_sensor.leak_toilet_water_leak
+          - binary_sensor.leak_toilet_zap_water_leak
+          - binary_sensor.leak_washer_water_leak
+        to: "on"
+    conditions: []
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.leak_emergency_acknowledged
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.leak_emergency_active
+      - action: switch.turn_off
+        continue_on_error: true
+        target:
+          entity_id:
+            - switch.watervalve_cold
+            - switch.watervalve_hot
+      - variables:
+          wet_zones: >-
+            {% set labels = {
+              'binary_sensor.leak_bath_water_leak': 'Ванная',
+              'binary_sensor.leak_bathroom_motors_water_leak': 'Ванная (моторы)',
+              'binary_sensor.leak_filters_water_leak': 'Туалет (фильтры)',
+              'binary_sensor.leak_kitchen_water_leak': 'Кухня',
+              'binary_sensor.leak_toilet_water_leak': 'Ванная (туалет)',
+              'binary_sensor.leak_toilet_zap_water_leak': 'Туалет (стояк zap)',
+              'binary_sensor.leak_washer_water_leak': 'Кухня (стиралка)'
+            } %}
+            {% set ns = namespace(z=[]) %}
+            {% for e, name in labels.items() %}
+              {% if is_state(e, 'on') %}
+                {% set ns.z = ns.z + [name] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.z | join(', ') if (ns.z | length) > 0 else 'Неизвестная зона' }}
+      - action: script.notify_dispatch
+        data:
+          level: p0_emergency
+          title: "🚨 АВАРИЯ: Протечка воды!"
+          message: "Обнаружена вода: {{ wet_zones }}. Отправлена команда перекрытия кранов ХВС и ГВС."
+          tag: "leak_emergency"
+          inline_keyboard:
+            - "Подтвердить тревогу (Ack):/ack_leak"
+          tts_message: "Внимание! Обнаружена протечка воды: {{ wet_zones }}. Перекрываю воду."
+      - delay: "00:00:15"
+      - if:
+          - condition: template
+            value_template: "{{ not (is_state('switch.watervalve_cold', 'off') and is_state('switch.watervalve_hot', 'off')) }}"
+        then:
+          - action: switch.turn_off
+            continue_on_error: true
+            target:
+              entity_id:
+                - switch.watervalve_cold
+                - switch.watervalve_hot
+          - delay: "00:00:10"
+          - if:
+              - condition: template
+                value_template: "{{ not (is_state('switch.watervalve_cold', 'off') and is_state('switch.watervalve_hot', 'off')) }}"
+            then:
+              - action: script.notify_dispatch
+                data:
+                  level: p0_emergency
+                  title: "🛑 КРИТИЧНО: Краны воды НЕ закрылись!"
+                  message: "ХВС={{ states('switch.watervalve_cold') }}, ГВС={{ states('switch.watervalve_hot') }}. Срочно перекройте воду вручную!"
+                  tag: "leak_valve_failure"
+                  tts_message: "Критическая ошибка! Краны воды не закрылись! Срочно перекройте воду вручную!"
+      - repeat:
+          for_each: [2, 3, 5, 10, 15, 30, 30, 60]
+          sequence:
+            - delay:
+                minutes: "{{ repeat.item }}"
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ is_state('input_boolean.leak_emergency_acknowledged', 'off')
+                       and (
+                         is_state('binary_sensor.leak_bath_water_leak', 'on')
+                         or is_state('binary_sensor.leak_bathroom_motors_water_leak', 'on')
+                         or is_state('binary_sensor.leak_filters_water_leak', 'on')
+                         or is_state('binary_sensor.leak_kitchen_water_leak', 'on')
+                         or is_state('binary_sensor.leak_toilet_water_leak', 'on')
+                         or is_state('binary_sensor.leak_toilet_zap_water_leak', 'on')
+                         or is_state('binary_sensor.leak_washer_water_leak', 'on')
+                       ) }}
+              then:
+                - action: script.notify_dispatch
+                  data:
+                    level: p0_emergency
+                    title: "🚨 ПОВТОР: Протечка не подтверждена!"
+                    message: "Датчики воды всё ещё активны ({{ wet_zones }}). Нажмите Подтвердить после проверки."
+                    tag: "leak_emergency"
+                    inline_keyboard:
+                      - "Подтвердить тревогу (Ack):/ack_leak"
+
+  # 3. Квитирование (Ack) тревоги протечки из Telegram или Mobile App
+  - id: "Авария: квитирование (Ack) тревоги протечки"
+    alias: leak_emergency_acknowledge
+    description: "Останавливает повторы тревоги протечки и очищает громкий пуш на телефонах."
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: telegram_callback
+        event_data:
+          command: "/ack_leak"
+        id: tg_ack
+      - trigger: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: "ACK_LEAK_EMERGENCY"
+        id: mobile_ack
+    actions:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.leak_emergency_acknowledged
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'tg_ack' and trigger.event.data.id is defined }}"
+        then:
+          - action: telegram_bot.answer_callback_query
+            continue_on_error: true
+            data:
+              callback_query_id: "{{ trigger.event.data.id }}"
+              message: "Тревога протечки подтверждена"
+      - action: script.notify_clear
+        data:
+          tag: "leak_emergency"
+          telegram_entity: notify.telegram_bot_8110302509_1002715853345
+          message_id: "{{ states('input_text.leak_last_telegram_msg_id') }}"
+          resolved_title: "✅ Тревога протечки подтверждена"
+          resolved_message: "Пользователь подтвердил получение тревоги ({{ now().strftime('%H:%M') }}). Повторы остановлены, краны остаются перекрытыми."
+          clear_mobile: true
+
+  # 4. Автообновление статуса после высыхания всех датчиков протечки
+  - id: "Авария: высыхание датчиков протечки — автообновление статуса"
+    alias: leak_emergency_resolved
+    description: "Снимает активный флаг аварии через 2 мин после высыхания датчиков, не открывая краны автоматически."
+    mode: single
+    triggers:
+      - trigger: template
+        value_template: >-
+          {{ not (
+            is_state('binary_sensor.leak_bath_water_leak', 'on')
+            or is_state('binary_sensor.leak_bathroom_motors_water_leak', 'on')
+            or is_state('binary_sensor.leak_filters_water_leak', 'on')
+            or is_state('binary_sensor.leak_kitchen_water_leak', 'on')
+            or is_state('binary_sensor.leak_toilet_water_leak', 'on')
+            or is_state('binary_sensor.leak_toilet_zap_water_leak', 'on')
+            or is_state('binary_sensor.leak_washer_water_leak', 'on')
+          ) }}
+        for:
+          minutes: 2
+    conditions:
+      - condition: state
+        entity_id: input_boolean.leak_emergency_active
+        state: "on"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.leak_emergency_active
+            - input_boolean.leak_emergency_acknowledged
+      - action: script.notify_clear
+        data:
+          tag: "leak_emergency"
+          telegram_entity: notify.telegram_bot_8110302509_1002715853345
+          message_id: "{{ states('input_text.leak_last_telegram_msg_id') }}"
+          resolved_title: "✅ Датчики протечки высохли"
+          resolved_message: "Все датчики протечки сухие ({{ now().strftime('%H:%M') }}). Краны ХВС/ГВС оставлены перекрытыми до ручной проверки."
+          clear_mobile: true
+
+  # 5. Сторожевой таймер отвала датчиков протечки (с Dependency Gating по Z2M и Restart Guard)
+  - id: "Мониторинг: отвал датчиков протечки (>10 мин)"
+    alias: leak_sensors_offline_watchdog
+    description: "Предупреждает об исчезновении датчиков протечки из сети (unavailable/unknown) при живом Zigbee2MQTT."
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id: sensor.notifications_offline_leak_sensors
+        attribute: signature
+        for:
+          minutes: 10
+        id: sig_change
+      - trigger: homeassistant
+        event: start
+        id: ha_start
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.zigbee2mqtt_bridge_connection_state
+        state: "on"
+    actions:
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'ha_start' }}"
+        then:
+          - delay: "00:03:00"
+      - variables:
+          cur_sig: "{{ state_attr('sensor.notifications_offline_leak_sensors', 'signature') | default('', true) }}"
+          prev_sig: "{{ states('input_text.leak_offline_notified_signature') | default('', true) }}"
+          off_items: "{{ state_attr('sensor.notifications_offline_leak_sensors', 'items') | default([], true) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ cur_sig != '' and cur_sig != prev_sig }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.leak_offline_notified_signature
+                data:
+                  value: "{{ cur_sig }}"
+              - action: script.notify_dispatch
+                data:
+                  level: p1_urgent
+                  title: "⚠️ Потеряны датчики протечки ({{ off_items | length }} из 7)"
+                  message: "Не передают данные >10 мин: {{ off_items | join(', ') }}. Защита этих зон не сработает при протечке!"
+                  tag: "leak_sensors_offline"
+          - conditions:
+              - condition: template
+                value_template: "{{ cur_sig == '' and prev_sig not in ['', 'unknown', 'unavailable', 'none'] }}"
+            sequence:
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.leak_offline_notified_signature
+                data:
+                  value: ""
+              - action: script.notify_dispatch
+                data:
+                  level: p3_info
+                  title: "✅ Датчики протечки в сети"
+                  message: "Все 7 датчиков протечки снова передают данные в Home Assistant."
+                  tag: "leak_sensors_offline"
+
+  # 6. Мониторинг моста Zigbee2MQTT (корневой узел для подавления штормов)
+  - id: "Мониторинг: связь с мостом Zigbee2MQTT"
+    alias: zigbee2mqtt_bridge_offline_watchdog
+    description: "Единый алерт при потере связи с Zigbee2MQTT и автообновление после восстановления."
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.zigbee2mqtt_bridge_connection_state
+        to: "off"
+        for:
+          minutes: 3
+        id: down
+      - trigger: state
+        entity_id: binary_sensor.zigbee2mqtt_bridge_connection_state
+        to: "on"
+        for:
+          minutes: 1
+        id: up
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ has_value('sensor.system_monitor_last_boot')
+             and (as_timestamp(now()) - as_timestamp(states('sensor.system_monitor_last_boot'))) > 180 }}
+    actions:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.id == 'down' and is_state('input_boolean.z2m_bridge_offline_warned', 'off') }}"
+            sequence:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.z2m_bridge_offline_warned
+              - action: script.notify_dispatch
+                data:
+                  level: p1_urgent
+                  title: "⚠️ Zigbee2MQTT Offline"
+                  message: "Потеряна связь с мостом Zigbee2MQTT (>3 мин). Алерты дочерних датчиков временно подавлены."
+                  tag: "z2m_bridge_offline"
+          - conditions:
+              - condition: template
+                value_template: "{{ trigger.id == 'up' and is_state('input_boolean.z2m_bridge_offline_warned', 'on') }}"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.z2m_bridge_offline_warned
+              - action: script.notify_clear
+                data:
+                  tag: "z2m_bridge_offline"
+                  telegram_entity: notify.telegram_bot_8110302509_1002715853345
+                  message_id: "{{ states('input_text.z2m_last_telegram_msg_id') }}"
+                  resolved_title: "✅ Zigbee2MQTT снова Online"
+                  resolved_message: "Связь с мостом Zigbee2MQTT восстановлена ({{ now().strftime('%H:%M') }})."
+                  clear_mobile: true
+
+  # 7. Ежедневный тихий дайджест обслуживания в 10:00 (P2 Maintenance)
+  - id: "Дайджест обслуживания (10:00): батарейки, расходники и диск HAOS"
+    alias: daily_maintenance_digest
+    description: "Раз в сутки в 10:00 отправляет единую тихую сводку только при наличии проблем."
+    mode: single
+    triggers:
+      - trigger: time
+        at: "10:00:00"
+    actions:
+      - variables:
+          bat_items: "{{ state_attr('sensor.notifications_low_batteries', 'items') | default([], true) }}"
+          leak_off: "{{ state_attr('sensor.notifications_offline_leak_sensors', 'items') | default([], true) }}"
+          dev_off: "{{ state_attr('sensor.notifications_offline_zigbee_ble_devices', 'items') | default([], true) }}"
+          disk_pct: "{{ states('sensor.system_monitor_disk_usage') | float(0) }}"
+          disk_thr: "{{ states('input_number.notifications_disk_warn_threshold') | float(85) }}"
+          canon_black: "{{ states('sensor.canon_bx110_series_black') | int(100) if has_value('sensor.canon_bx110_series_black') else 100 }}"
+          canon_color: "{{ states('sensor.canon_bx110_series_color') | int(100) if has_value('sensor.canon_bx110_series_color') else 100 }}"
+          hum_eva_refill: "{{ is_state('input_boolean.humidifier_needs_refill', 'on') }}"
+          hum_zap_refill: "{{ is_state('input_boolean.humidifier_zap_needs_refill', 'on') }}"
+          sections: >-
+            {% set ns = namespace(parts=[]) %}
+            {% if (bat_items | length) > 0 %}
+              {% set ns.parts = ns.parts + ['🔋 Батарейки (<' ~ (states('input_number.notifications_battery_low_threshold') | int(20)) ~ '%): ' ~ (bat_items | join('; '))] %}
+            {% endif %}
+            {% if (leak_off | length) > 0 %}
+              {% set ns.parts = ns.parts + ['💧 Датчики протечки offline (' ~ (leak_off | length) ~ '): ' ~ (leak_off | join(', '))] %}
+            {% endif %}
+            {% if (dev_off | length) > 0 %}
+              {% set ns.parts = ns.parts + ['📡 Батарейные датчики offline (' ~ (dev_off | length) ~ '): ' ~ (dev_off | join(', '))] %}
+            {% endif %}
+            {% if canon_black <= 15 or canon_color <= 15 %}
+              {% set ink = [] %}
+              {% if canon_black <= 15 %}{% set ink = ink + ['чёрный PGI-35 (1509B001): ' ~ canon_black ~ '%'] %}{% endif %}
+              {% if canon_color <= 15 %}{% set ink = ink + ['цветной CLI-36 (1511B001): ' ~ canon_color ~ '%'] %}{% endif %}
+              {% set ns.parts = ns.parts + ['🖨️ Чернила Canon BX110: ' ~ (ink | join(', '))] %}
+            {% endif %}
+            {% if hum_eva_refill or hum_zap_refill %}
+              {% set hum = [] %}
+              {% if hum_eva_refill %}{% set hum = hum + ['eva'] %}{% endif %}
+              {% if hum_zap_refill %}{% set hum = hum + ['zap'] %}{% endif %}
+              {% set ns.parts = ns.parts + ['💨 Заправить увлажнители: ' ~ (hum | join(', '))] %}
+            {% endif %}
+            {% if disk_pct >= disk_thr %}
+              {% set ns.parts = ns.parts + ['💾 Диск HAOS: ' ~ (disk_pct | round(1)) ~ '% (порог ' ~ (disk_thr | int) ~ '%)'] %}
+            {% endif %}
+            {{ ns.parts }}
+      - if:
+          - condition: template
+            value_template: "{{ (sections | length) > 0 }}"
+        then:
+          - action: script.notify_dispatch
+            data:
+              level: p2_maintenance
+              title: "🧰 Сводка обслуживания дома"
+              message: "{{ sections | join('\n') }}"
+              tag: "daily_maintenance_digest"
