@@ -54,6 +54,9 @@
   }
 } -%}
 
+{%- set INDOOR_SENSOR_GRACE_SEC = 180 -%}
+{%- set CO2_LOST_DEBOUNCE_SEC = 120 -%}
+
 {%- macro calc_co2_trend(room) -%}
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
   {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
@@ -97,7 +100,7 @@
     {%- endif -%}
   {%- endfor -%}
   {%- set overloads_off = ns_ov.ok -%}
-  {%- set slope_ok = has_value(cfg.co2_slope) -%}
+  {%- set slope_ok = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
 
   {%- set prev_load = 2.1 if reset_gen else (p.get('closed_load_estimate_ppm_min') | float(2.1)) -%}
   {%- set l_count = 0 if reset_gen else (p.get('load_sample_count') | int(0)) -%}
@@ -169,10 +172,15 @@
   } | to_json -}}
 {%- endmacro -%}
 
-{%- macro calc_safety_temp(room) -%}
+{%- macro calc_safety_temp(room, prev_attrs={}) -%}
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
+  {%- set p = prev_attrs if (prev_attrs is mapping) else {} -%}
   {%- set indoor_mode = is_state(cfg.use_indoor_temp, 'on') -%}
   {%- set primary_valid = has_value(cfg.primary_temp) -%}
+  {%- set pt_lc = states[cfg.primary_temp].last_changed if states[cfg.primary_temp] is not none else none -%}
+  {%- set unavail_sec = ([as_timestamp(now()) - as_timestamp(pt_lc), 0.0] | max) if (not primary_valid and pt_lc is not none) else (0.0 if primary_valid else 9999.0) -%}
+  {%- set prev_room_raw = p.get('last_valid_room_temperature') -%}
+  {%- set prev_room_ok = prev_room_raw is not none and is_number(prev_room_raw) -%}
   {%- set outdoor_raw = state_attr(cfg.weather, 'temperature') -%}
   {%- set outdoor_valid = outdoor_raw is not none and is_number(outdoor_raw) -%}
   {%- if indoor_mode and primary_valid -%}
@@ -180,16 +188,40 @@
     {%- set src = 'primary_room' -%}
     {%- set thr = states(cfg.min_indoor_temp) | float(16) -%}
     {%- set unsafe = val <= thr -%}
+    {%- set hold_active = false -%}
+    {%- set fallback_active = false -%}
+    {%- set last_valid_room = val -%}
+  {%- elif indoor_mode and unavail_sec < INDOOR_SENSOR_GRACE_SEC -%}
+    {%- set hold_active = true -%}
+    {%- set fallback_active = false -%}
+    {%- set thr = states(cfg.min_indoor_temp) | float(16) -%}
+    {%- if prev_room_ok -%}
+      {%- set val = prev_room_raw | float -%}
+      {%- set src = 'primary_room' -%}
+      {%- set unsafe = val <= thr -%}
+      {%- set last_valid_room = val -%}
+    {%- else -%}
+      {%- set val = none -%}
+      {%- set src = 'startup_grace' -%}
+      {%- set unsafe = false -%}
+      {%- set last_valid_room = none -%}
+    {%- endif -%}
   {%- elif outdoor_valid -%}
     {%- set val = outdoor_raw | float -%}
     {%- set src = 'outdoor' -%}
     {%- set thr = states(cfg.min_outdoor_temp) | float(-10) -%}
     {%- set unsafe = val <= thr -%}
+    {%- set hold_active = false -%}
+    {%- set fallback_active = indoor_mode -%}
+    {%- set last_valid_room = (states(cfg.primary_temp) | float) if primary_valid else ((prev_room_raw | float) if prev_room_ok else none) -%}
   {%- else -%}
     {%- set val = none -%}
     {%- set src = 'unavailable' -%}
     {%- set thr = none -%}
     {%- set unsafe = true -%}
+    {%- set hold_active = false -%}
+    {%- set fallback_active = indoor_mode -%}
+    {%- set last_valid_room = (prev_room_raw | float) if prev_room_ok else none -%}
   {%- endif -%}
   {{- {
     'available': val is not none,
@@ -199,7 +231,10 @@
       'source': src,
       'selected_threshold': thr,
       'unsafe': unsafe,
-      'fallback_active': indoor_mode and (not primary_valid),
+      'fallback_active': fallback_active,
+      'sensor_hold_active': hold_active,
+      'primary_unavail_sec': unavail_sec | round(1),
+      'last_valid_room_temperature': last_valid_room,
       'primary_room_temperature': (states(cfg.primary_temp) | float) if primary_valid else none,
       'outdoor_temperature': (outdoor_raw | float) if outdoor_valid else none
     }
@@ -303,9 +338,11 @@
 
 {%- macro calc_forecast_co2(room) -%}
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
-  {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
-  {%- set raw_co2 = states(cfg.co2_raw) | float(650) -%}
-  {%- set filtered = states(cfg.co2_filtered) | float(raw_co2) -%}
+  {%- set co2_lc = states[cfg.co2_raw].last_changed if states[cfg.co2_raw] is not none else none -%}
+  {%- set co2_ok_or_grace = has_value(cfg.co2_raw) or (co2_lc is not none and (as_timestamp(now()) - as_timestamp(co2_lc)) < INDOOR_SENSOR_GRACE_SEC) -%}
+  {%- set avail = co2_ok_or_grace and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(650) -%}
+  {%- set raw_co2 = (states(cfg.co2_raw) | float(filtered)) if has_value(cfg.co2_raw) else filtered -%}
   {%- set slope = states(cfg.co2_slope) | float(0) -%}
   {{- {
     'available': avail,
@@ -357,9 +394,11 @@
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
   {%- set p = prev_attrs if (prev_attrs is mapping) else {} -%}
   {%- set prev_gen = p.get('controller_generation') | int(0) -%}
-  {%- set avail = has_value(cfg.co2_raw) and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) and has_value(cfg.forecast_error) -%}
-  {%- set raw_co2 = states(cfg.co2_raw) | float(650) -%}
-  {%- set filtered = states(cfg.co2_filtered) | float(raw_co2) -%}
+  {%- set co2_lc = states[cfg.co2_raw].last_changed if states[cfg.co2_raw] is not none else none -%}
+  {%- set co2_ok_or_grace = has_value(cfg.co2_raw) or (co2_lc is not none and (as_timestamp(now()) - as_timestamp(co2_lc)) < INDOOR_SENSOR_GRACE_SEC) -%}
+  {%- set avail = co2_ok_or_grace and has_value(cfg.co2_filtered) and has_value(cfg.co2_slope) and has_value(cfg.forecast_error) -%}
+  {%- set filtered = states(cfg.co2_filtered) | float(650) -%}
+  {%- set raw_co2 = (states(cfg.co2_raw) | float(filtered)) if has_value(cfg.co2_raw) else filtered -%}
   {%- set slope = states(cfg.co2_slope) | float(0) -%}
   {%- set forecast_co2 = states(cfg.forecast_co2) | float(filtered) -%}
   {%- set forecast_error = states(cfg.forecast_error) | float(0) -%}
@@ -540,35 +579,63 @@
   } | to_json -}}
 {%- endmacro -%}
 
-{%- macro eval_safety_close(room) -%}
+{%- macro eval_safety_close(room, trig_id='') -%}
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
-  {%- set t_val = states(cfg.safety_temp) -%}
-  {%- set t_thr = state_attr(cfg.safety_temp, 'selected_threshold') -%}
-  {%- set t_src = state_attr(cfg.safety_temp, 'source') | default('unavailable', true) -%}
-  {%- set temp_unsafe = (not is_number(t_val)) or (t_thr is none) or ((t_val | float) <= (t_thr | float)) -%}
+  {%- set tid = (trig_id | default('', true) | string | trim) -%}
   {%- set ns_ov = namespace(any_on=false) -%}
   {%- for ov in cfg.overloads -%}
     {%- if is_state(ov, 'on') -%}
       {%- set ns_ov.any_on = true -%}
     {%- endif -%}
   {%- endfor -%}
-  {%- set co2_lost = is_state(cfg.co2_raw, 'unavailable') -%}
+  {%- set co2_raw_bad = not has_value(cfg.co2_raw) -%}
+  {%- set co2_lc = states[cfg.co2_raw].last_changed if states[cfg.co2_raw] is not none else none -%}
+  {%- set co2_unavail_sec = ([as_timestamp(now()) - as_timestamp(co2_lc), 0.0] | max) if co2_lc is not none else 9999.0 -%}
+  {%- set co2_lost = co2_raw_bad and (tid == 'co2_lost' or co2_unavail_sec >= CO2_LOST_DEBOUNCE_SEC) -%}
+  {%- if has_value(cfg.safety_temp) -%}
+    {%- set t_val = states(cfg.safety_temp) | float -%}
+    {%- set t_thr = state_attr(cfg.safety_temp, 'selected_threshold') -%}
+    {%- set t_src = state_attr(cfg.safety_temp, 'source') | default('unavailable', true) -%}
+    {%- set u_attr = state_attr(cfg.safety_temp, 'unsafe') -%}
+    {%- set temp_unsafe = (u_attr | bool) if (u_attr is boolean) else ((t_thr is none) or (t_val <= (t_thr | float))) -%}
+  {%- else -%}
+    {%- set pt_lc = states[cfg.primary_temp].last_changed if states[cfg.primary_temp] is not none else none -%}
+    {%- set pt_age = ([as_timestamp(now()) - as_timestamp(pt_lc), 0.0] | max) if pt_lc is not none else 9999.0 -%}
+    {%- if is_state(cfg.use_indoor_temp, 'on') and pt_age < INDOOR_SENSOR_GRACE_SEC -%}
+      {%- set temp_unsafe = false -%}
+      {%- set t_val = none -%}
+      {%- set t_thr = states(cfg.min_indoor_temp) | float(16) -%}
+      {%- set t_src = 'startup_grace' -%}
+    {%- else -%}
+      {%- set temp_unsafe = true -%}
+      {%- set t_val = none -%}
+      {%- set t_thr = none -%}
+      {%- set t_src = 'unavailable' -%}
+    {%- endif -%}
+  {%- endif -%}
+  {%- set st_lc = states[cfg.safety_temp].last_changed if states[cfg.safety_temp] is not none else none -%}
+  {%- set st_age = ([as_timestamp(now()) - as_timestamp(st_lc), 0.0] | max) if st_lc is not none else 9999.0 -%}
+  {%- set temp_close_ready = temp_unsafe and (tid != 'periodic' or st_age >= 15) -%}
   {%- set cover_open = (state_attr(cfg.cover, 'current_position') | int(0)) > 0 -%}
-  {%- if ns_ov.any_on -%}
+  {%- set temp_reason = 'cold_indoor_primary' if t_src == 'primary_room' else ('cold_outdoor' if t_src == 'outdoor' else 'temperature_sources_unavailable') -%}
+  {%- if tid == 'overload' and ns_ov.any_on -%}
+    {%- set reason = 'overload' -%}
+  {%- elif tid == 'co2_lost' and co2_lost -%}
+    {%- set reason = 'co2_sensor_lost' -%}
+  {%- elif tid == 'cold' and temp_unsafe -%}
+    {%- set reason = temp_reason -%}
+  {%- elif ns_ov.any_on -%}
     {%- set reason = 'overload' -%}
   {%- elif co2_lost -%}
     {%- set reason = 'co2_sensor_lost' -%}
-  {%- elif t_src == 'primary_room' -%}
-    {%- set reason = 'cold_indoor_primary' -%}
-  {%- elif t_src == 'outdoor' -%}
-    {%- set reason = 'cold_outdoor' -%}
   {%- else -%}
-    {%- set reason = 'temperature_sources_unavailable' -%}
+    {%- set reason = temp_reason -%}
   {%- endif -%}
   {{- {
     'temp_unsafe': temp_unsafe,
-    'should_close': cover_open and (temp_unsafe or ns_ov.any_on or co2_lost),
+    'should_close': cover_open and (ns_ov.any_on or co2_lost or temp_close_ready),
     'reason': reason,
+    'trigger_id': tid,
     'label': cfg.label,
     'cover': cfg.cover,
     'last_adjustment': cfg.last_adjustment,

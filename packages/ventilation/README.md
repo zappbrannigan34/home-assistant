@@ -173,8 +173,12 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 - selected safety temperature, source, fallback state и оба temperature thresholds;
 - overload/safety state.
 
+- `input_boolean.ventilation_use_indoor_temperature` (`ventilation_eva_use_indoor_temperature`): в режиме `on` при кратковременном `unavailable` комнатного датчика (`< 180 с`, например при рестарте Zigbee2MQTT) удерживается `last_valid_room_temperature` без ложного сброса на уличную температуру; уличный fallback включается только при недоступности датчика `>= 180 с`.
+- `eval_safety_close` и `script.ventilation_apply_safety_close` привязывают причину закрытия к фактическому `trigger.id`, а потеря CO₂ (`co2_sensor_lost`) срабатывает только при недоступности датчика CO₂ `>= 120 с`.
+- `sensor.ventilation_zap_safety_temperature` и `sensor.ventilation_eva_safety_temperature` работают в trigger-based формате с сохранением `last_valid_room_temperature`, а `calc_forecast_co2` и `calc_recommended` удерживают PI-интеграл в течение `180 с` при кратких пропаданиях CO₂.
+
 **Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
 **Notifications:** routed through `script.notify_dispatch` (`p1_urgent` for drive overload, `p3_info` for cold/CO₂ safety close)
 
-**Version:** 3.2.0
+**Version:** 3.3.0

@@ -1,5 +1,5 @@
 # package: ventilation_multiroom
-# Version: 3.2.0
+# Version: 3.3.0
 # Last Updated: 2026-11-24
 # Description: Unified room-agnostic ventilation engine (custom_templates/ventilation.jinja + shared scripts) for ZAP & EVA, routed through script.notify_dispatch
 
@@ -313,24 +313,44 @@ template:
           last_max_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_max_position }}"
           last_model_update: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('zap', p, tid) | from_json).attributes.last_model_update }}"
 
-  - sensor:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: state
+        entity_id:
+          - sensor.sensor_zap_temperature
+          - input_boolean.ventilation_use_indoor_temperature
+          - input_number.ventilation_min_indoor_temp
+          - input_number.ventilation_min_outdoor_temp
+          - weather.forecast_home_assistant
+      - platform: homeassistant
+        event: start
+    sensor:
       - name: "Ventilation ZAP Safety Temperature"
         unique_id: ventilation_zap_safety_temperature
         unit_of_measurement: "°C"
         device_class: temperature
         state_class: measurement
         icon: mdi:shield-thermometer
+        availability: >
+          {% from 'ventilation.jinja' import calc_safety_temp %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_safety_temp('zap', p) | from_json).available }}
         state: >
           {% from 'ventilation.jinja' import calc_safety_temp %}
-          {{ (calc_safety_temp('zap') | from_json).state }}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_safety_temp('zap', p) | from_json).state }}
         attributes:
-          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.requested_mode }}"
-          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.source }}"
-          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.selected_threshold }}"
-          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.unsafe }}"
-          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.fallback_active }}"
-          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.primary_room_temperature }}"
-          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('zap') | from_json).attributes.outdoor_temperature }}"
+          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.requested_mode }}"
+          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.source }}"
+          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.selected_threshold }}"
+          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.unsafe }}"
+          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.fallback_active }}"
+          sensor_hold_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.sensor_hold_active }}"
+          primary_unavail_sec: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.primary_unavail_sec }}"
+          last_valid_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.last_valid_room_temperature }}"
+          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.primary_room_temperature }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('zap', p) | from_json).attributes.outdoor_temperature }}"
 
   - trigger:
       - platform: time_pattern
@@ -568,24 +588,44 @@ template:
           last_max_position: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_max_position }}"
           last_model_update: "{% from 'ventilation.jinja' import calc_room_model %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{% set tid = trigger.id if (trigger is defined and trigger.id is defined) else 'observation' %}{{ (calc_room_model('eva', p, tid) | from_json).attributes.last_model_update }}"
 
-  - sensor:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: state
+        entity_id:
+          - sensor.sensor_eva_temperature
+          - input_boolean.ventilation_eva_use_indoor_temperature
+          - input_number.ventilation_eva_min_indoor_temp
+          - input_number.ventilation_eva_min_outdoor_temp
+          - weather.forecast_home_assistant
+      - platform: homeassistant
+        event: start
+    sensor:
       - name: "Ventilation Eva Safety Temperature"
         unique_id: ventilation_eva_safety_temperature
         unit_of_measurement: "°C"
         device_class: temperature
         state_class: measurement
         icon: mdi:shield-thermometer
+        availability: >
+          {% from 'ventilation.jinja' import calc_safety_temp %}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_safety_temp('eva', p) | from_json).available }}
         state: >
           {% from 'ventilation.jinja' import calc_safety_temp %}
-          {{ (calc_safety_temp('eva') | from_json).state }}
+          {% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+          {{ (calc_safety_temp('eva', p) | from_json).state }}
         attributes:
-          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.requested_mode }}"
-          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.source }}"
-          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.selected_threshold }}"
-          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.unsafe }}"
-          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.fallback_active }}"
-          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.primary_room_temperature }}"
-          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{{ (calc_safety_temp('eva') | from_json).attributes.outdoor_temperature }}"
+          requested_mode: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.requested_mode }}"
+          source: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.source }}"
+          selected_threshold: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.selected_threshold }}"
+          unsafe: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.unsafe }}"
+          fallback_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.fallback_active }}"
+          sensor_hold_active: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.sensor_hold_active }}"
+          primary_unavail_sec: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.primary_unavail_sec }}"
+          last_valid_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.last_valid_room_temperature }}"
+          primary_room_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.primary_room_temperature }}"
+          outdoor_temperature: "{% from 'ventilation.jinja' import calc_safety_temp %}{% set p = this.attributes if (this is defined and this.attributes is mapping) else {} %}{{ (calc_safety_temp('eva', p) | from_json).attributes.outdoor_temperature }}"
 
   - trigger:
       - platform: time_pattern
@@ -787,11 +827,16 @@ script:
       room:
         description: "Ключ комнаты (zap или eva)"
         required: true
+      trigger_id:
+        description: "ID сработавшего триггера автоматизации"
+        default: ""
     sequence:
       - variables:
           safety: >
             {% from 'ventilation.jinja' import eval_safety_close %}
-            {{ eval_safety_close(room) | from_json }}
+            {{ eval_safety_close(room, trigger_id | default('', true)) | from_json }}
+      - condition: template
+        value_template: "{{ safety.should_close }}"
       - service: cover.close_cover
         target:
           entity_id: "{{ safety.cover }}"
@@ -900,7 +945,9 @@ automation:
 
       - platform: state
         entity_id: sensor.sensor_zap_co2
-        to: "unavailable"
+        to:
+          - "unavailable"
+          - "unknown"
         for:
           minutes: 2
         id: "co2_lost"
@@ -913,12 +960,13 @@ automation:
       - condition: template
         value_template: >
           {% from 'ventilation.jinja' import eval_safety_close %}
-          {{ (eval_safety_close('zap') | from_json).should_close }}
+          {{ (eval_safety_close('zap', trigger.id | default('', true)) | from_json).should_close }}
 
     action:
       - service: script.ventilation_apply_safety_close
         data:
           room: "zap"
+          trigger_id: "{{ trigger.id | default('', true) }}"
 
   - id: "Ошибка привода окна"
     alias: ventilation_device_error
@@ -983,7 +1031,9 @@ automation:
 
       - platform: state
         entity_id: sensor.sensor_eva_co2
-        to: "unavailable"
+        to:
+          - "unavailable"
+          - "unknown"
         for:
           minutes: 2
         id: "co2_lost"
@@ -996,12 +1046,13 @@ automation:
       - condition: template
         value_template: >
           {% from 'ventilation.jinja' import eval_safety_close %}
-          {{ (eval_safety_close('eva') | from_json).should_close }}
+          {{ (eval_safety_close('eva', trigger.id | default('', true)) | from_json).should_close }}
 
     action:
       - service: script.ventilation_apply_safety_close
         data:
           room: "eva"
+          trigger_id: "{{ trigger.id | default('', true) }}"
 
   - id: "Ошибка привода окна eva"
     alias: ventilation_eva_device_error
