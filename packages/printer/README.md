@@ -12,7 +12,7 @@
 | Статус принтера | `sensor.canon_bx110_series` |
 | Чёрный картридж | `sensor.canon_bx110_series_black` — **Canon PGI-35 Black** (арт. `1509B001`) |
 | Цветной картридж | `sensor.canon_bx110_series_color` — **Canon CLI-36 Color** (арт. `1511B001`) |
-| Канал уведомлений | `notify.telegram_bot_8110302509_1002699581686` (`telegram_bot.send_message`), резерв `notify.mobile_app_zapphone` |
+| Канал уведомлений | Общий диспетчер `script.notify_dispatch` (`p2_maintenance` для `<= 15%`, `p3_info` для `0%`) и `script.notify_clear` при замене |
 
 ## Создаваемые сущности
 
@@ -22,7 +22,6 @@
 | `input_boolean.canon_bx110_color_low_warned` | `input_boolean` | Флаг отправленного предупреждения `<= 15%` для цветного (без `initial:`) |
 | `input_boolean.canon_bx110_black_empty_warned` | `input_boolean` | Флаг отправленного алерта `0%` для чёрного (без `initial:`) |
 | `input_boolean.canon_bx110_color_empty_warned` | `input_boolean` | Флаг отправленного алерта `0%` для цветного (без `initial:`) |
-| `script.printer_send_notification` | `script` | Отправка сообщения через `telegram_bot.send_message` с fallback на `mobile_app_zapphone` |
 | `automation.canon_bx110_ink_low_warning` | `automation` | Предупреждение при `<= 15%` (выдержка 1 мин, 1 раз за цикл картриджа) |
 | `automation.canon_bx110_ink_empty_alert` | `automation` | Алерт при `0%` (выдержка 1 мин, 1 раз за цикл картриджа) |
 | `automation.canon_bx110_ink_refill_reset` | `automation` | Автосброс флагов при замене картриджа (`> 20%`, выдержка 1 мин) |
@@ -39,9 +38,9 @@
 3. Проверить конфигурацию (`/api/config/core/check_config`).
 4. Перезагрузить только домены пакета (полный рестарт HA Core не требуется):
    - `input_boolean.reload`
-   - `script.reload`
    - `automation.reload`
 
 ## Version
 
+1.1.0 — перевод отправки уведомлений и автоочистки на единый диспетчер `packages/notifications` (`script.notify_dispatch` / `script.notify_clear`), удалён локальный `script.printer_send_notification`.  
 1.0.0 — первичная версия пакета уведомлений об уровне чернил Canon MAXIFY BX110.

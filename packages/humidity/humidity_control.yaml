@@ -1,7 +1,7 @@
 # package: puh_9105_humidity_multiroom
-# Version: 4.4.3
-# Last Updated: 2026-11-23
-# Changes: Switch operating mode to 'sleep' (mode=4) for full display/touch-button blackout after 15s (backlight=false only dims tank LED), remove redundant MQTT intensity/humidity writes in sleep, support sleep water estimation & full-cycle calibration, add turn-on hysteresis to stop 10s eva short-cycling
+# Version: 4.4.4
+# Last Updated: 2026-11-24
+# Changes: Route all humidity notifications and refill clear-actions through centralized packages/notifications (script.notify_dispatch / script.notify_clear), remove duplicate script.humidity_send_notification
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (целевой режим + состояние "бак пуст, ждём заправки")
@@ -1213,35 +1213,6 @@ script:
             - automation.humidity_zap_control_main
             - automation.humidity_zap_mode_enforcer
 
-  humidity_send_notification:
-    alias: "Уведомление контура влажности (Telegram + резерв mobile_app)"
-    mode: queued
-    max: 10
-    fields:
-      title:
-        description: "Заголовок"
-        required: true
-      message:
-        description: "Текст сообщения"
-        required: true
-    sequence:
-      - if:
-          - condition: template
-            value_template: "{{ states('notify.telegram_bot_8110302509_1002699581686') not in ['unavailable', 'none', ''] }}"
-        then:
-          - action: telegram_bot.send_message
-            continue_on_error: true
-            data:
-              entity_id: notify.telegram_bot_8110302509_1002699581686
-              title: "{{ title }}"
-              message: "{{ message }}"
-        else:
-          - action: notify.mobile_app_zapphone
-            continue_on_error: true
-            data:
-              title: "{{ title }}"
-              message: "{{ message }}"
-
   humidifier_confirm_refill:
     alias: "Подтвердить полную заправку бака увлажнителя (100%)"
     mode: parallel
@@ -1286,8 +1257,14 @@ script:
           entity_id: "{{ ctrl_auto }}"
         data:
           skip_condition: false
-      - service: script.humidity_send_notification
+      - action: script.notify_clear
         data:
+          tag: "humidifier_water_{{ room }}"
+          clear_mobile: true
+      - action: script.notify_dispatch
+        data:
+          level: p3_info
+          tag: "humidifier_water_{{ room }}"
           title: "✅ Бак заправлен ({{ room }})"
           message: "Счётчик воды сброшен на 100%, автоуправление активно."
 
@@ -1933,8 +1910,10 @@ automation:
       - service: input_boolean.turn_on
         target:
           entity_id: "{{ warn_bool }}"
-      - service: script.humidity_send_notification
+      - action: script.notify_dispatch
         data:
+          level: p3_info
+          tag: "humidifier_water_{{ trigger.id }}"
           title: "⚠️ Мало воды в баке ({{ trigger.id }}) — {{ level }}%"
           message: "Осталось около {{ remaining_ml }} мл (~{{ hours_rem }} ч). Наполните бак водой — сброс и возобновление работы произойдут автоматически."
 
@@ -1983,8 +1962,14 @@ automation:
       - service: input_boolean.turn_off
         target:
           entity_id: "{{ warn_bool }}"
-      - service: script.humidity_send_notification
+      - action: script.notify_clear
         data:
+          tag: "humidifier_water_{{ trigger.id }}"
+          clear_mobile: true
+      - action: script.notify_dispatch
+        data:
+          level: p3_info
+          tag: "humidifier_water_{{ trigger.id }}"
           title: "✅ Бак заправлен ({{ trigger.id }})"
           message: "Флаг заправки снят вручную, счётчик воды сброшен на 100%."
 
@@ -2110,8 +2095,10 @@ automation:
                 "level_hours": h,
                 "timestamp": now().isoformat()} | to_json -}}
 
-      - service: script.humidity_send_notification
+      - action: script.notify_dispatch
         data:
+          level: p2_maintenance
+          tag: "humidifier_calibration_eva"
           title: "📊 Калибровка расхода увлажнителя (eva)"
           message: >-
             {%- set rates_raw = states('input_text.humidifier_consumption_rates') -%}
@@ -2295,8 +2282,10 @@ automation:
         target:
           entity_id: "{{ power_ent }}"
 
-      - service: script.humidity_send_notification
+      - action: script.notify_dispatch
         data:
+          level: "{{ 'p3_info' if error_code in ['01', 'low_water'] else ('p2_maintenance' if error_code in ['03', 'replace_filter', '05', 'clean_tank'] else 'p1_urgent') }}"
+          tag: "{{ 'humidifier_water_eva' if error_code in ['01', 'low_water'] else 'humidifier_error_eva' }}"
           title: "{{ error_title }}"
           message: >
             {{ error_message }}
@@ -2605,8 +2594,10 @@ automation:
                 "level_hours": h,
                 "timestamp": now().isoformat()} | to_json -}}
 
-      - service: script.humidity_send_notification
+      - action: script.notify_dispatch
         data:
+          level: p2_maintenance
+          tag: "humidifier_calibration_zap"
           title: "📊 Калибровка расхода увлажнителя (zap)"
           message: >-
             {%- set rates_raw = states('input_text.humidifier_zap_consumption_rates') -%}
@@ -2790,8 +2781,10 @@ automation:
         target:
           entity_id: "{{ power_ent }}"
 
-      - service: script.humidity_send_notification
+      - action: script.notify_dispatch
         data:
+          level: "{{ 'p3_info' if error_code in ['01', 'low_water'] else ('p2_maintenance' if error_code in ['03', 'replace_filter', '05', 'clean_tank'] else 'p1_urgent') }}"
+          tag: "{{ 'humidifier_water_zap' if error_code in ['01', 'low_water'] else 'humidifier_error_zap' }}"
           title: "{{ error_title }}"
           message: >
             {{ error_message }}

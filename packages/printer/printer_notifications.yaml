@@ -1,7 +1,7 @@
 # package: canon_bx110_printer_notifications
-# Version: 1.0.0
+# Version: 1.1.0
 # Last Updated: 2026-11-24
-# Purpose: Уведомления в Telegram о низком уровне (<= 15%) и окончании (0%) чернил принтера Canon MAXIFY BX110
+# Purpose: Уведомления в Telegram о низком уровне (<= 15%) и окончании (0%) чернил принтера Canon MAXIFY BX110 через общий диспетчер notifications
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (флаги отправленных уведомлений за цикл картриджа)
@@ -26,41 +26,7 @@ input_boolean:
     icon: mdi:printer-off
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  SCRIPT (единая отправка в Telegram с резервом на mobile_app)
-# ──────────────────────────────────────────────────────────────────────────────
-
-script:
-  printer_send_notification:
-    alias: "Уведомление принтера Canon BX110 (Telegram + резерв mobile_app)"
-    mode: queued
-    max: 10
-    fields:
-      title:
-        description: "Заголовок уведомления"
-        required: true
-      message:
-        description: "Текст уведомления"
-        required: true
-    sequence:
-      - if:
-          - condition: template
-            value_template: "{{ states('notify.telegram_bot_8110302509_1002699581686') not in ['unavailable', 'none', ''] }}"
-        then:
-          - action: telegram_bot.send_message
-            continue_on_error: true
-            data:
-              entity_id: notify.telegram_bot_8110302509_1002699581686
-              title: "{{ title }}"
-              message: "{{ message }}"
-        else:
-          - action: notify.mobile_app_zapphone
-            continue_on_error: true
-            data:
-              title: "{{ title }}"
-              message: "{{ message }}"
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  AUTOMATIONS
+#  AUTOMATIONS (маршрутизация через общий пакет notifications)
 # ──────────────────────────────────────────────────────────────────────────────
 
 automation:
@@ -114,8 +80,10 @@ automation:
                 - action: input_boolean.turn_on
                   target:
                     entity_id: "{{ low_bool }}"
-                - action: script.printer_send_notification
+                - action: script.notify_dispatch
                   data:
+                    level: p2_maintenance
+                    tag: "printer_ink_{{ repeat.item }}"
                     title: "🖨️ Мало чернил Canon BX110: {{ cartridge_label }} ({{ level_val }}%)"
                     message: >-
                       Заканчивается {{ cartridge_label }} картридж ({{ level_val }}%, порог 15%).
@@ -170,8 +138,10 @@ automation:
                     entity_id:
                       - "{{ low_bool }}"
                       - "{{ empty_bool }}"
-                - action: script.printer_send_notification
+                - action: script.notify_dispatch
                   data:
+                    level: p3_info
+                    tag: "printer_ink_{{ repeat.item }}"
                     title: "🛑 Закончились чернила Canon BX110: {{ cartridge_label }} (0%)"
                     message: >-
                       Полностью закончился {{ cartridge_label }} картридж (0%).
@@ -216,3 +186,7 @@ automation:
           entity_id:
             - "{{ low_bool }}"
             - "{{ empty_bool }}"
+      - action: script.notify_clear
+        data:
+          tag: "printer_ink_{{ 'black' if is_black else 'color' }}"
+          clear_mobile: true

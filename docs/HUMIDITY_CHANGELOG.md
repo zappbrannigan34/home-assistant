@@ -7,6 +7,17 @@
 
 ---
 
+## v4.4.4 (2026-11-24)
+
+**Version:** 4.4.4
+
+### Изменения: перевод уведомлений на единый диспетчер `packages/notifications`
+
+1. Удалён локальный дубликат `script.humidity_send_notification` из `packages/humidity/humidity_control.yaml`.
+2. Все 7 точек отправки уведомлений (предупреждение `<= 15%`, подтверждение заправки, ручной сброс заправки, калибровка `eva`/`zap`, ошибки устройств `eva`/`zap`) переведены на `script.notify_dispatch` (`p1_urgent` / `p2_maintenance` / `p3_info`) и `script.notify_clear` при подтверждении заправки.
+
+---
+
 ## v4.4.3 (2026-11-23)
 
 **Version:** 4.4.3

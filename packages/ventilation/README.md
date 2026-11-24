@@ -175,4 +175,6 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 
 **Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
-**Version:** 3.1.0
+**Notifications:** routed through `script.notify_dispatch` (`p1_urgent` for drive overload, `p3_info` for cold/CO₂ safety close)
+
+**Version:** 3.2.0

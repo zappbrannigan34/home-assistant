@@ -78,7 +78,7 @@
 Каждый увлажнитель отслеживается отдельно:
 
 - **Стейт-машина заправки (`needs_refill`)**: при ошибке `low_water`/`01` включается `input_boolean.humidifier_*_needs_refill`, питание выключается, а `Water Level` принудительно показывает **`0%`** (`remaining_ml: 0`, `hours_remaining: 0.0`).
-- **Надёжные уведомления (`script.humidity_send_notification`) и порог 15%**: все уведомления об ошибках, предупреждении `<= 15%` (`humidity_water_low_warning`, 1 раз за цикл через `low_water_warned`), заправке и калибровке идут в Telegram (`continue_on_error: true`) с автоматическим fallback в `notify.mobile_app_zapphone` при недоступности Telegram-бота.
+- **Надёжные уведомления (`script.notify_dispatch` / `script.notify_clear`) и порог 15%**: все уведомления об ошибках, предупреждении `<= 15%` (`humidity_water_low_warning`, 1 раз за цикл через `low_water_warned`), заправке и калибровке маршрутизируются через единый диспетчер `packages/notifications` (с учётом тихих часов, приоритетов `P1–P3`, fallback в `mobile_app` и автоочисткой при заправке).
 - **Полностью автоматическая фиксация заправки (`tank_replaced` + 15 с проба, без ручных кнопок)**: Polaris PUH‑9105 использует съёмный бак (без верхнего долива), поэтому достаточно достать бак, залить воду и поставить его на место (даже когда прибор выключен / в Standby):
   1. **Детектор снятия и установки бака (`tank_replaced` в `humidity_*_refill_detected`)**: отслеживает переход `binary_sensor.*_water_tank` (`on → off`), отсеивая ложный ~55-секундный сброс в Standby фильтром `dur >= 10 and (not nr_on or since_empty > 2 or dur > 75)`. Далее автоматика запускает **тихую 15-секундную пробу** (`switch.turn_on` с приглушением `sound`/`backlight`, защищено от отключения через `probe_running` в `refill_probe_grace` внутри `humidity_apply_area_control`). Если за 15 с прибор работает и ошибка остаётся в норме (`00`/`no_error`/`02`/`child_lock`) при закрытом баке (`water_tank == 'off'`), неблокирующе запускается `script.humidifier_*_confirm_refill` (`100%`, `needs_refill → off`, уведомление, `humidity_control_main`); если бак пуст — питание сразу выключается;
   2. **Резервный канал (`power_on_20s`)**: если `needs_refill == 'on'` и прибор проработал 20 с без `low_water`, также срабатывает `script.humidifier_*_confirm_refill`;
@@ -138,7 +138,6 @@
 ### Scripts
 
 - `script.humidity_auto_resume` / `script.humidity_zap_auto_resume`
-- `script.humidity_send_notification`
 - `script.humidifier_confirm_refill` (`humidifier_eva_confirm_refill` / `humidifier_zap_confirm_refill`)
 - `script.humidity_setup_area_devices`
 - `script.humidity_enforce_area_mode`
@@ -171,4 +170,4 @@
 
 **Devices:** Polaris PUH‑9105 / PUH‑2709 (`eva`, `zap`)  
 **Integration:** `polaris-mqtt` (MQTT)  
-**Version пакета:** 4.4.3
+**Version пакета:** 4.4.4

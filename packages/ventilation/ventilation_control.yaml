@@ -1,7 +1,7 @@
 # package: ventilation_multiroom
-# Version: 3.1.0
-# Last Updated: 2026-11-22
-# Description: Unified room-agnostic ventilation engine (custom_templates/ventilation.jinja + shared scripts) for ZAP & EVA, without radiator coupling
+# Version: 3.2.0
+# Last Updated: 2026-11-24
+# Description: Unified room-agnostic ventilation engine (custom_templates/ventilation.jinja + shared scripts) for ZAP & EVA, routed through script.notify_dispatch
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT NUMBERS (настройки регулирования по комнатам, без initial:)
@@ -800,10 +800,10 @@ script:
           entity_id: "{{ safety.last_adjustment }}"
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
-      - action: telegram_bot.send_message
-        continue_on_error: true
+      - action: script.notify_dispatch
         data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
+          level: "{{ 'p1_urgent' if safety.reason == 'overload' else 'p3_info' }}"
+          tag: "ventilation_safety_{{ room }}"
           title: "🪟 Окно {{ safety.label }} закрыто (безопасность)"
           message: >
             Причина: {{ safety.reason }}.
@@ -832,10 +832,10 @@ script:
           info: >
             {% from 'ventilation.jinja' import get_device_error_info %}
             {{ get_device_error_info(room) | from_json }}
-      - action: telegram_bot.send_message
-        continue_on_error: true
+      - action: script.notify_dispatch
         data:
-          entity_id: notify.telegram_bot_8110302509_1002699581686
+          level: p1_urgent
+          tag: "ventilation_overload_{{ room }}"
           title: "⚠️ Перегрузка привода Drivent ({{ info.label }})"
           message: >
             Привод обнаружил перегрузку. Проверьте:
