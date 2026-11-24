@@ -1,5 +1,5 @@
 # package: ventilation_multiroom
-# Version: 3.3.0
+# Version: 3.4.0
 # Last Updated: 2026-11-24
 # Description: Unified room-agnostic ventilation engine (custom_templates/ventilation.jinja + shared scripts) for ZAP & EVA, routed through script.notify_dispatch
 
@@ -847,7 +847,7 @@ script:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
       - action: script.notify_dispatch
         data:
-          level: "{{ 'p1_urgent' if safety.reason == 'overload' else 'p3_info' }}"
+          level: p3_info
           tag: "ventilation_safety_{{ room }}"
           title: "🪟 Окно {{ safety.label }} закрыто (безопасность)"
           message: >
@@ -858,38 +858,9 @@ script:
               Минимум: {{ safety.threshold }}°C.
             {% elif safety.reason == 'temperature_sources_unavailable' %}
               Все разрешённые источники температуры недоступны. Выполнено fail-safe закрытие.
-            {% elif safety.reason == 'overload' %}
-              Привод обнаружил перегрузку ({{ safety.label }}). Проверьте окна.
             {% elif safety.reason == 'co2_sensor_lost' %}
               Датчик CO2 недоступен. Окно закрыто в целях безопасности.
             {% endif %}
-
-  ventilation_notify_device_error:
-    alias: "Вентиляция: уведомление о перегрузке привода"
-    mode: parallel
-    max: 4
-    fields:
-      room:
-        description: "Ключ комнаты (zap или eva)"
-        required: true
-    sequence:
-      - variables:
-          info: >
-            {% from 'ventilation.jinja' import get_device_error_info %}
-            {{ get_device_error_info(room) | from_json }}
-      - action: script.notify_dispatch
-        data:
-          level: p1_urgent
-          tag: "ventilation_overload_{{ room }}"
-          title: "⚠️ Перегрузка привода Drivent ({{ info.label }})"
-          message: >
-            Привод обнаружил перегрузку. Проверьте:
-            - не зажато ли что-то в окне
-            - открывается ли окно без заеданий
-            - не заблокирована ли ручка
-
-            Текущий CO2 ({{ info.label }}): {{ info.co2 }} ppm
-            Позиция окна: {{ info.position }}%
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  AUTOMATIONS (тонкие обёртки для комнат на общем движке)
@@ -934,16 +905,6 @@ automation:
         id: "cold"
 
       - platform: state
-        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
-        to: "on"
-        id: "overload"
-
-      - platform: state
-        entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
-        to: "on"
-        id: "overload"
-
-      - platform: state
         entity_id: sensor.sensor_zap_co2
         to:
           - "unavailable"
@@ -967,25 +928,6 @@ automation:
         data:
           room: "zap"
           trigger_id: "{{ trigger.id | default('', true) }}"
-
-  - id: "Ошибка привода окна"
-    alias: ventilation_device_error
-    mode: single
-    initial_state: true
-
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.drivent_zap_left_datchik_peregruzki
-        to: "on"
-
-      - platform: state
-        entity_id: binary_sensor.drivent_zap_back_datchik_peregruzki
-        to: "on"
-
-    action:
-      - service: script.ventilation_notify_device_error
-        data:
-          room: "zap"
 
   # ══ EVA ═════════════════════════════════════════════════════════════════════
   - id: "Управление вентиляцией по CO2 eva"
@@ -1025,11 +967,6 @@ automation:
         id: "cold"
 
       - platform: state
-        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
-        to: "on"
-        id: "overload"
-
-      - platform: state
         entity_id: sensor.sensor_eva_co2
         to:
           - "unavailable"
@@ -1053,18 +990,3 @@ automation:
         data:
           room: "eva"
           trigger_id: "{{ trigger.id | default('', true) }}"
-
-  - id: "Ошибка привода окна eva"
-    alias: ventilation_eva_device_error
-    mode: single
-    initial_state: true
-
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.drivent_eva_datchik_peregruzki
-        to: "on"
-
-    action:
-      - service: script.ventilation_notify_device_error
-        data:
-          room: "eva"

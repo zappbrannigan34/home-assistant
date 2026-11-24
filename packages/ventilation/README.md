@@ -135,7 +135,7 @@ fixed steps и дополнительные CO₂ conditions в actuator layer �
 
 `sensor.ventilation_zap_safety_temperature` публикует выбранное значение, source, threshold и fallback state. Если ни один разрешённый источник недоступен, automation закрывает окна fail-safe.
 
-обычное управление блокируется, а safety automation закрывает окна при selected temperature на соответствующем пороге или ниже, overload любого ZAP actuator или недоступности `sensor.sensor_zap_co2` более двух минут.
+обычное управление блокируется, а safety automation закрывает окна при selected temperature на соответствующем пороге или ниже или недоступности `sensor.sensor_zap_co2` более двух минут.
 
 в режиме `off` thermal cap отключён и защита температуры выполняется только по наружному hard threshold. В режиме `on` thermal cap использует ту же primary/fallback indoor chain; при смене source temperature slope сбрасывается без ложного скачка.
 
@@ -171,7 +171,7 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 - equilibrium, automatic gains, integral и bounded forecast assist;
 - room temperature, heating setpoint, predicted temperature и thermal cap;
 - selected safety temperature, source, fallback state и оба temperature thresholds;
-- overload/safety state.
+- safety state.
 
 - `input_boolean.ventilation_use_indoor_temperature` (`ventilation_eva_use_indoor_temperature`): в режиме `on` при кратковременном `unavailable` комнатного датчика (`< 180 с`, например при рестарте Zigbee2MQTT) удерживается `last_valid_room_temperature` без ложного сброса на уличную температуру; уличный fallback включается только при недоступности датчика `>= 180 с`.
 - `eval_safety_close` и `script.ventilation_apply_safety_close` привязывают причину закрытия к фактическому `trigger.id`, а потеря CO₂ (`co2_sensor_lost`) срабатывает только при недоступности датчика CO₂ `>= 120 с`.
@@ -179,6 +179,6 @@ ZAP model и temperature entities не используются EVA. Для EVA 
 
 **Device:** Drivent V2, grouped ZAP covers + single EVA cover
 
-**Notifications:** routed through `script.notify_dispatch` (`p1_urgent` for drive overload, `p3_info` for cold/CO₂ safety close)
+**Notifications:** routed through `script.notify_dispatch` (`p3_info` for cold/CO₂ safety close; overload notifications and emergency close disabled)
 
-**Version:** 3.3.0
+**Version:** 3.4.0

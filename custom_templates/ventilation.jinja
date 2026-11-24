@@ -582,12 +582,6 @@
 {%- macro eval_safety_close(room, trig_id='') -%}
   {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
   {%- set tid = (trig_id | default('', true) | string | trim) -%}
-  {%- set ns_ov = namespace(any_on=false) -%}
-  {%- for ov in cfg.overloads -%}
-    {%- if is_state(ov, 'on') -%}
-      {%- set ns_ov.any_on = true -%}
-    {%- endif -%}
-  {%- endfor -%}
   {%- set co2_raw_bad = not has_value(cfg.co2_raw) -%}
   {%- set co2_lc = states[cfg.co2_raw].last_changed if states[cfg.co2_raw] is not none else none -%}
   {%- set co2_unavail_sec = ([as_timestamp(now()) - as_timestamp(co2_lc), 0.0] | max) if co2_lc is not none else 9999.0 -%}
@@ -618,14 +612,10 @@
   {%- set temp_close_ready = temp_unsafe and (tid != 'periodic' or st_age >= 15) -%}
   {%- set cover_open = (state_attr(cfg.cover, 'current_position') | int(0)) > 0 -%}
   {%- set temp_reason = 'cold_indoor_primary' if t_src == 'primary_room' else ('cold_outdoor' if t_src == 'outdoor' else 'temperature_sources_unavailable') -%}
-  {%- if tid == 'overload' and ns_ov.any_on -%}
-    {%- set reason = 'overload' -%}
-  {%- elif tid == 'co2_lost' and co2_lost -%}
+  {%- if tid == 'co2_lost' and co2_lost -%}
     {%- set reason = 'co2_sensor_lost' -%}
   {%- elif tid == 'cold' and temp_unsafe -%}
     {%- set reason = temp_reason -%}
-  {%- elif ns_ov.any_on -%}
-    {%- set reason = 'overload' -%}
   {%- elif co2_lost -%}
     {%- set reason = 'co2_sensor_lost' -%}
   {%- else -%}
@@ -633,7 +623,7 @@
   {%- endif -%}
   {{- {
     'temp_unsafe': temp_unsafe,
-    'should_close': cover_open and (ns_ov.any_on or co2_lost or temp_close_ready),
+    'should_close': cover_open and (co2_lost or temp_close_ready),
     'reason': reason,
     'trigger_id': tid,
     'label': cfg.label,
@@ -642,14 +632,5 @@
     'selected_temp': t_val,
     'source': t_src,
     'threshold': t_thr
-  } | to_json -}}
-{%- endmacro -%}
-
-{%- macro get_device_error_info(room) -%}
-  {%- set cfg = ROOMS.get(room, ROOMS['zap']) -%}
-  {{- {
-    'label': cfg.label,
-    'co2': states(cfg.co2_raw),
-    'position': state_attr(cfg.cover, 'current_position')
   } | to_json -}}
 {%- endmacro -%}
