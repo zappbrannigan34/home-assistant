@@ -1,5 +1,5 @@
 # package: notifications_control
-# Version: 1.0.0
+# Version: 1.0.1
 # Last Updated: 2026-11-24
 # Purpose: Единый диспетчер уведомлений (P0-P3), аварийный контур протечек,
 #          watchdog отвала датчиков/Z2M и утренний дайджест обслуживания (10:00).
@@ -289,14 +289,16 @@ script:
     sequence:
       - variables:
           lvl: "{{ level | default('p3_info') }}"
+          is_muted: "{{ mute_telegram | default(false) | bool(false) }}"
           tg_entity: >-
             {{ 'notify.telegram_bot_8110302509_1002715853345'
                if lvl in ['p0_emergency', 'p1_urgent']
                else 'notify.telegram_bot_8110302509_1002699581686' }}
-          tg_ok: "{{ states(tg_entity) not in ['unavailable', 'unknown', 'none', ''] }}"
+          # Штатный state у notify.telegram_bot_* равен 'unknown' (до первого notify.send_message)
+          tg_ok: "{{ states(tg_entity) not in ['unavailable', 'none', ''] }}"
           quiet: "{{ is_state('binary_sensor.notifications_quiet_time', 'on') }}"
           tg_silent: >-
-            {% if mute_telegram | bool(false) %}
+            {% if is_muted %}
               true
             {% elif lvl == 'p0_emergency' %}
               false
@@ -306,7 +308,9 @@ script:
               {{ quiet }}
             {% endif %}
           msg_tag: "{{ tag | default('', true) | string }}"
-          has_kbd: "{{ (inline_keyboard | default([]) | length) > 0 }}"
+          kbd: "{{ inline_keyboard | default([]) }}"
+          has_kbd: "{{ (kbd | length) > 0 }}"
+          tts_txt: "{{ tts_message | default('', true) | string | trim }}"
 
       # 1. Основная отправка в Telegram (при наличии маршрута)
       - if:
@@ -320,6 +324,7 @@ script:
                 sequence:
                   - action: telegram_bot.send_message
                     continue_on_error: true
+                    response_variable: tg_resp
                     data:
                       entity_id: "{{ tg_entity }}"
                       title: "{{ title }}"
@@ -327,13 +332,14 @@ script:
                       parse_mode: plain_text
                       disable_notification: "{{ tg_silent | bool(false) }}"
                       message_tag: "{{ msg_tag }}"
-                      inline_keyboard: "{{ inline_keyboard }}"
+                      inline_keyboard: "{{ kbd }}"
               - conditions:
                   - condition: template
                     value_template: "{{ msg_tag != '' }}"
                 sequence:
                   - action: telegram_bot.send_message
                     continue_on_error: true
+                    response_variable: tg_resp
                     data:
                       entity_id: "{{ tg_entity }}"
                       title: "{{ title }}"
@@ -347,16 +353,18 @@ script:
                 sequence:
                   - action: telegram_bot.send_message
                     continue_on_error: true
+                    response_variable: tg_resp
                     data:
                       entity_id: "{{ tg_entity }}"
                       title: "{{ title }}"
                       message: "{{ message }}"
                       parse_mode: plain_text
                       disable_notification: "{{ tg_silent | bool(false) }}"
-                      inline_keyboard: "{{ inline_keyboard }}"
+                      inline_keyboard: "{{ kbd }}"
             default:
               - action: telegram_bot.send_message
                 continue_on_error: true
+                response_variable: tg_resp
                 data:
                   entity_id: "{{ tg_entity }}"
                   title: "{{ title }}"
@@ -367,7 +375,7 @@ script:
       # 2. Для P0 — параллельный пробой DND на оба телефона + TTS на Яндекс.Станции
       - if:
           - condition: template
-            value_template: "{{ lvl == 'p0_emergency' and not (mute_telegram | bool(false)) }}"
+            value_template: "{{ lvl == 'p0_emergency' and not is_muted }}"
         then:
           - action: notify.mobile_app_zapphone
             continue_on_error: true
@@ -401,7 +409,7 @@ script:
                     title: "Подтвердить (Ack)"
           - if:
               - condition: template
-                value_template: "{{ (tts_message | default('', true) | trim) != '' }}"
+                value_template: "{{ tts_txt != '' }}"
             then:
               - repeat:
                   for_each:
@@ -419,13 +427,19 @@ script:
                           target:
                             entity_id: "{{ repeat.item }}"
                           data:
-                            media_content_id: "{{ tts_message }}"
+                            media_content_id: "{{ tts_txt }}"
                             media_content_type: text
 
-      # 3. Fallback на mobile_app, если Telegram недоступен (для P1-P3)
+      # 3. Fallback на mobile_app, если Telegram недоступен или отправка не вернула ответ (для P1-P3)
+      - variables:
+          tg_delivered: >-
+            {{ tg_ok
+               and (tg_resp is defined)
+               and (tg_resp is mapping)
+               and ((tg_resp | length) > 0) }}
       - if:
           - condition: template
-            value_template: "{{ not tg_ok and lvl != 'p0_emergency' }}"
+            value_template: "{{ (not tg_delivered) and lvl != 'p0_emergency' }}"
         then:
           - action: notify.mobile_app_zapphone
             continue_on_error: true
@@ -470,35 +484,42 @@ script:
         description: "Снимать ли пуш с телефонов через clear_notification"
         default: true
     sequence:
+      - variables:
+          do_clear_mobile: "{{ clear_mobile | default(true) | bool(true) }}"
+          clr_tag: "{{ tag | default('', true) | string }}"
+          tg_ent: "{{ telegram_entity | default('notify.telegram_bot_8110302509_1002715853345', true) }}"
+          msg_id_str: "{{ message_id | default('', true) | string | trim }}"
+          res_title: "{{ resolved_title | default('', true) | string }}"
+          res_msg: "{{ resolved_message | default('', true) | string | trim }}"
       - if:
           - condition: template
-            value_template: "{{ clear_mobile | bool(true) and (tag | default('', true)) != '' }}"
+            value_template: "{{ do_clear_mobile and clr_tag != '' }}"
         then:
           - action: notify.mobile_app_zapphone
             continue_on_error: true
             data:
               message: "clear_notification"
               data:
-                tag: "{{ tag }}"
+                tag: "{{ clr_tag }}"
           - action: notify.mobile_app_masy
             continue_on_error: true
             data:
               message: "clear_notification"
               data:
-                tag: "{{ tag }}"
+                tag: "{{ clr_tag }}"
       - if:
           - condition: template
             value_template: >-
-              {{ (message_id | default('', true) | string | trim) not in ['', 'unknown', 'unavailable', 'none']
-                 and (resolved_message | default('', true) | trim) != '' }}
+              {{ msg_id_str not in ['', 'unknown', 'unavailable', 'none']
+                 and res_msg != '' }}
         then:
           - action: telegram_bot.edit_message
             continue_on_error: true
             data:
-              entity_id: "{{ telegram_entity | default('notify.telegram_bot_8110302509_1002715853345') }}"
-              message_id: "{{ message_id }}"
-              title: "{{ resolved_title }}"
-              message: "{{ resolved_message }}"
+              entity_id: "{{ tg_ent }}"
+              message_id: "{{ msg_id_str }}"
+              title: "{{ res_title }}"
+              message: "{{ res_msg }}"
               parse_mode: plain_text
 
 # ──────────────────────────────────────────────────────────────────────────────
