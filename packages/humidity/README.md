@@ -34,9 +34,10 @@
 
 Три переиспользуемых скрипта работают с любым количеством увлажнителей внутри указанной `area`:
 
-- `script.humidity_setup_area_devices` — инициализирует каждый увлажнитель комнаты (`mode: sleep`, `warm_stream: on`, `ioniser: on`, `child_lock: on`, `sound: off`, `backlight: off`); пропускает устройства с активным `needs_refill`, `low_water` или снятым баком.
-- `script.humidity_enforce_area_mode` — удерживает ночной режим (`mode: sleep`) и блокировку на всех включённых устройствах комнаты.
-- `script.humidity_apply_area_control` — применяет включение/выключение (`recommended_intensity`) ко всем готовым увлажнителям комнаты независимо (ошибка или снятый бак на одном устройстве не останавливает остальные в той же `area`).
+- `script.humidity_setup_area_devices` — инициализирует каждый увлажнитель комнаты (`mode: sleep`, `warm_stream: on`, `ioniser: on`, `child_lock: on`, `sound: off`, `backlight: off`); пропускает устройства в `Standby`, с активным `needs_refill`, `low_water` или снятым баком.
+- `script.humidity_enforce_area_mode` — удерживает ночной режим (`mode: sleep`) и блокировку на всех включённых устройствах комнаты (в `Standby` соблюдается 100% радиотишина).
+- `script.humidity_apply_area_control` — применяет включение/выключение (`recommended_intensity`) ко всем готовым увлажнителям комнаты независимо (ошибка или снятый бак на одном устройстве не останавливает остальные в той же `area`), соблюдая 0 MQTT-команд в `Standby`/ошибках, 3-секундный settle перед холодным стартом и пробуждение через `switch.turn_on(power)` перед `mode: sleep`.
+- `automation.humidity_device_offline_watchdog` — отслеживает `binary_sensor.*_available*` и отправляет `p2_maintenance` через `script.notify_dispatch` при офлайне `>= 10 мин` (с автосбросом через `script.notify_clear`).
 
 ---
 

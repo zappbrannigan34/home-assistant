@@ -1,7 +1,7 @@
 # package: puh_9105_humidity_multiroom
-# Version: 4.4.4
+# Version: 4.4.5
 # Last Updated: 2026-11-24
-# Changes: Route all humidity notifications and refill clear-actions through centralized packages/notifications (script.notify_dispatch / script.notify_clear), remove duplicate script.humidity_send_notification
+# Changes: 100% radio silence in Standby/faults (eliminate child_lock<->low_water storm), 3s settle + live pre-start guard + power-first wake, tighten tank_replaced debounce and calibrate_rates guards, add effective_intensity sensors and offline watchdog
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (целевой режим + состояние "бак пуст, ждём заправки")
@@ -410,7 +410,7 @@ template:
             {{ states('input_number.humidity_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.4.3"
+          controller_version: "4.4.5"
           area_id: "eva"
           target_mode: >
             {% if is_state('input_boolean.humidity_adaptive_target', 'on') %}
@@ -559,7 +559,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.4.3"
+          controller_version: "4.4.5"
           area_id: "eva"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -756,6 +756,25 @@ template:
               "7": states('sensor.humidifier_level_7_hours') | float(0)
             } }}
 
+  - sensor:
+      - name: "Humidifier Effective Intensity"
+        unique_id: humidifier_effective_intensity
+        icon: mdi:water-percent
+        state_class: measurement
+        availability: >
+          {{ not is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'unavailable')
+             and not is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'unknown')
+             and not is_state('binary_sensor.humidifier_puh_9105_puh_2709_available', 'off') }}
+        state: >
+          {% set hum_on = is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'on') %}
+          {% set power_on = is_state('switch.humidifier_puh_9105_puh_2709_power', 'on') %}
+          {% set intensity = states('number.humidifier_puh_9105_puh_2709_intensity') | int(0) %}
+          {% if hum_on or power_on %}
+            {{ intensity if intensity > 0 else 6 }}
+          {% else %}
+            0
+          {% endif %}
+
   # ════════════════════════════════════════════════════════════════════════════
   #  ZAP — БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ
   # ════════════════════════════════════════════════════════════════════════════
@@ -843,7 +862,7 @@ template:
             {{ states('input_number.humidity_zap_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.4.3"
+          controller_version: "4.4.5"
           area_id: "zap"
           target_mode: >
             {% if is_state('input_boolean.humidity_zap_adaptive_target', 'on') %}
@@ -991,7 +1010,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.4.3"
+          controller_version: "4.4.5"
           area_id: "zap"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -1187,6 +1206,25 @@ template:
               "6": states('sensor.humidifier_zap_level_6_hours') | float(0),
               "7": states('sensor.humidifier_zap_level_7_hours') | float(0)
             } }}
+
+  - sensor:
+      - name: "Humidifier Zap Effective Intensity"
+        unique_id: humidifier_zap_effective_intensity
+        icon: mdi:water-percent
+        state_class: measurement
+        availability: >
+          {{ not is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier_2', 'unavailable')
+             and not is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier_2', 'unknown')
+             and not is_state('binary_sensor.humidifier_puh_9105_puh_2709_available_2', 'off') }}
+        state: >
+          {% set hum_on = is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier_2', 'on') %}
+          {% set power_on = is_state('switch.humidifier_puh_9105_puh_2709_power_2', 'on') %}
+          {% set intensity = states('number.humidifier_puh_9105_puh_2709_intensity_2') | int(0) %}
+          {% if hum_on or power_on %}
+            {{ intensity if intensity > 0 else 6 }}
+          {% else %}
+            0
+          {% endif %}
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  SCRIPTS (возобновление и area-driven управление устройствами)
@@ -1400,7 +1438,11 @@ script:
                 standby_settled: >-
                   {% set lc = states[hum_ent].last_changed if (hum_ent != '' and states[hum_ent] is not none) else none %}
                   {% set age = (as_timestamp(now()) - as_timestamp(lc)) if lc is not none else 999 %}
-                  {{ age > 15 }}
+                  {{ age >= 6 }}
+                has_fault_or_empty: >-
+                  {{ (err_ent != '' and states(err_ent) not in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'])
+                     or (refill_ent != '' and is_state(refill_ent, 'on'))
+                     or (tank_ent != '' and is_state(tank_ent, 'on')) }}
                 can_run: >-
                   {{ (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'])
                      and (refill_ent == '' or not is_state(refill_ent, 'on'))
@@ -1412,10 +1454,12 @@ script:
                   {% set probe_running = refill_auto != '' and (state_attr(refill_auto, 'current') | int(0)) > 0 %}
                   {% set lc = states[hum_ent].last_changed if (hum_ent != '' and states[hum_ent] is not none) else none %}
                   {% set age = (as_timestamp(now()) - as_timestamp(lc)) if lc is not none else 999 %}
-                  {{ refill_ent != '' and is_state(refill_ent, 'on')
-                     and is_state(hum_ent, 'on')
-                     and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', ''])
-                     and (probe_running or age < 30) }}
+                  {{ probe_running or (
+                       refill_ent != '' and is_state(refill_ent, 'on')
+                       and is_state(hum_ent, 'on')
+                       and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', ''])
+                       and age < 30
+                     ) }}
 
             - if:
                 - condition: template
@@ -1436,7 +1480,7 @@ script:
                           then:
                             - if:
                                 - condition: template
-                                  value_template: "{{ child_lock_ent != '' and is_state(child_lock_ent, 'off') }}"
+                                  value_template: "{{ child_lock_ent != '' and is_state(child_lock_ent, 'off') and not (has_fault_or_empty | bool(false)) }}"
                               then:
                                 - service: switch.turn_on
                                   continue_on_error: true
@@ -1445,10 +1489,12 @@ script:
                             - variables:
                                 aux_off: >-
                                   {% set ns = namespace(items=[]) %}
-                                  {% if warm_stream_ent != '' and is_state(warm_stream_ent, 'on') %}{% set ns.items = ns.items + [warm_stream_ent] %}{% endif %}
-                                  {% if ioniser_ent != '' and is_state(ioniser_ent, 'on') %}{% set ns.items = ns.items + [ioniser_ent] %}{% endif %}
-                                  {% if backlight_ent != '' and is_state(backlight_ent, 'on') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
-                                  {% if sound_ent != '' and is_state(sound_ent, 'on') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
+                                  {% if not (has_fault_or_empty | bool(false)) %}
+                                    {% if warm_stream_ent != '' and is_state(warm_stream_ent, 'on') %}{% set ns.items = ns.items + [warm_stream_ent] %}{% endif %}
+                                    {% if ioniser_ent != '' and is_state(ioniser_ent, 'on') %}{% set ns.items = ns.items + [ioniser_ent] %}{% endif %}
+                                    {% if backlight_ent != '' and is_state(backlight_ent, 'on') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
+                                    {% if sound_ent != '' and is_state(sound_ent, 'on') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
+                                  {% endif %}
                                   {{ ns.items }}
                             - if:
                                 - condition: template
@@ -1470,38 +1516,30 @@ script:
                                 - service: switch.turn_off
                                   target:
                                     entity_id: "{{ power_ent }}"
-                          else:
-                            - if:
-                                - condition: template
-                                  value_template: "{{ not (dev_is_on | bool(false)) and (standby_settled | bool(false)) }}"
-                              then:
-                                - if:
-                                    - condition: template
-                                      value_template: "{{ child_lock_ent != '' and is_state(child_lock_ent, 'off') }}"
-                                  then:
-                                    - service: switch.turn_on
-                                      continue_on_error: true
-                                      target:
-                                        entity_id: "{{ child_lock_ent }}"
-                                - variables:
-                                    standby_off: >-
-                                      {% set ns = namespace(items=[]) %}
-                                      {% if backlight_ent != '' and is_state(backlight_ent, 'on') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
-                                      {% if sound_ent != '' and is_state(sound_ent, 'on') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
-                                      {{ ns.items }}
-                                - if:
-                                    - condition: template
-                                      value_template: "{{ (standby_off | count) > 0 }}"
-                                  then:
-                                    - service: switch.turn_off
-                                      target:
-                                        entity_id: "{{ standby_off }}"
 
                     # ── ВЕТКА ХОЛОДНОГО СТАРТА (recommended >= 1 и устройство сейчас выключено) ──
                     - conditions:
                         - condition: template
-                          value_template: "{{ (recommended | int(0)) >= 1 and (can_run | bool(false)) and not (dev_is_on | bool(false)) }}"
+                          value_template: "{{ (recommended | int(0)) >= 1 and (can_run | bool(false)) and not (dev_is_on | bool(false)) and (standby_settled | bool(false)) and (refill_auto == '' or (state_attr(refill_auto, 'current') | int(0)) == 0) }}"
                       sequence:
+                        - delay:
+                            seconds: 3
+                        - condition: template
+                          value_template: >-
+                            {{ (states(recommended_entity) | int(0)) >= 1
+                               and states(hum_ent) not in ['unavailable', 'unknown']
+                               and states(power_ent) not in ['unavailable', 'unknown']
+                               and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'])
+                               and (refill_ent == '' or not is_state(refill_ent, 'on'))
+                               and (tank_ent == '' or not is_state(tank_ent, 'on'))
+                               and (refill_auto == '' or (state_attr(refill_auto, 'current') | int(0)) == 0)
+                               and not is_state(hum_ent, 'on')
+                               and not is_state(power_ent, 'on') }}
+                        - service: switch.turn_on
+                          target:
+                            entity_id: "{{ power_ent }}"
+                        - delay:
+                            seconds: 1
                         - service: humidifier.set_mode
                           target:
                             entity_id: "{{ hum_ent }}"
@@ -1511,40 +1549,34 @@ script:
                             seconds: 2
                         - if:
                             - condition: template
-                              value_template: "{{ is_state(hum_ent, 'off') }}"
+                              value_template: >-
+                                {{ is_state(hum_ent, 'on')
+                                   and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'])
+                                   and (refill_ent == '' or not is_state(refill_ent, 'on'))
+                                   and (tank_ent == '' or not is_state(tank_ent, 'on')) }}
                           then:
-                            - service: switch.turn_on
-                              target:
-                                entity_id: "{{ power_ent }}"
-                            - delay:
-                                seconds: 1
-                            - service: humidifier.set_mode
-                              target:
-                                entity_id: "{{ hum_ent }}"
-                              data:
-                                mode: "sleep"
-                        - variables:
-                            early_off: >-
-                              {% set ns = namespace(items=[]) %}
-                              {% if sound_ent != '' and not is_state(sound_ent, 'off') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
-                              {% if backlight_ent != '' and not is_state(backlight_ent, 'off') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
-                              {{ ns.items }}
-                        - if:
-                            - condition: template
-                              value_template: "{{ (early_off | count) > 0 }}"
-                          then:
-                            - service: switch.turn_off
-                              continue_on_error: true
-                              target:
-                                entity_id: "{{ early_off }}"
-                        - if:
-                            - condition: template
-                              value_template: "{{ child_lock_ent != '' and not is_state(child_lock_ent, 'on') }}"
-                          then:
-                            - service: switch.turn_on
-                              continue_on_error: true
-                              target:
-                                entity_id: "{{ child_lock_ent }}"
+                            - variables:
+                                early_off: >-
+                                  {% set ns = namespace(items=[]) %}
+                                  {% if sound_ent != '' and not is_state(sound_ent, 'off') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
+                                  {% if backlight_ent != '' and not is_state(backlight_ent, 'off') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
+                                  {{ ns.items }}
+                            - if:
+                                - condition: template
+                                  value_template: "{{ (early_off | count) > 0 }}"
+                              then:
+                                - service: switch.turn_off
+                                  continue_on_error: true
+                                  target:
+                                    entity_id: "{{ early_off }}"
+                            - if:
+                                - condition: template
+                                  value_template: "{{ child_lock_ent != '' and not is_state(child_lock_ent, 'on') }}"
+                              then:
+                                - service: switch.turn_on
+                                  continue_on_error: true
+                                  target:
+                                    entity_id: "{{ child_lock_ent }}"
                         - delay:
                             seconds: 2
                         - variables:
@@ -1553,48 +1585,60 @@ script:
                             - condition: template
                               value_template: "{{ (rec_after_boot | int(0)) == 0 }}"
                           then:
-                            - service: switch.turn_off
-                              target:
-                                entity_id: "{{ power_ent }}"
-                            - wait_template: "{{ is_state(hum_ent, 'off') }}"
-                              timeout: "00:00:05"
-                              continue_on_timeout: true
-                          else:
-                            - variables:
-                                boot_off_switches: >-
-                                  {% set ns = namespace(items=[]) %}
-                                  {% if sound_ent != '' and not is_state(sound_ent, 'off') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
-                                  {% if backlight_ent != '' and not is_state(backlight_ent, 'off') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
-                                  {{ ns.items }}
-                                boot_on_switches: >-
-                                  {% set ns = namespace(items=[]) %}
-                                  {% if child_lock_ent != '' and not is_state(child_lock_ent, 'on') %}{% set ns.items = ns.items + [child_lock_ent] %}{% endif %}
-                                  {% if ioniser_ent != '' and not is_state(ioniser_ent, 'on') %}{% set ns.items = ns.items + [ioniser_ent] %}{% endif %}
-                                  {% if warm_stream_ent != '' and not is_state(warm_stream_ent, 'on') %}{% set ns.items = ns.items + [warm_stream_ent] %}{% endif %}
-                                  {{ ns.items }}
                             - if:
                                 - condition: template
-                                  value_template: "{{ (boot_off_switches | count) > 0 }}"
+                                  value_template: "{{ is_state(hum_ent, 'on') or is_state(power_ent, 'on') }}"
                               then:
                                 - service: switch.turn_off
                                   target:
-                                    entity_id: "{{ boot_off_switches }}"
+                                    entity_id: "{{ power_ent }}"
+                                - wait_template: "{{ is_state(hum_ent, 'off') }}"
+                                  timeout: "00:00:05"
+                                  continue_on_timeout: true
+                          else:
                             - if:
                                 - condition: template
-                                  value_template: "{{ (boot_on_switches | count) > 0 }}"
+                                  value_template: >-
+                                    {{ is_state(hum_ent, 'on')
+                                       and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', '', 'unknown', 'unavailable'])
+                                       and (refill_ent == '' or not is_state(refill_ent, 'on'))
+                                       and (tank_ent == '' or not is_state(tank_ent, 'on')) }}
                               then:
-                                - service: switch.turn_on
-                                  target:
-                                    entity_id: "{{ boot_on_switches }}"
-                            - if:
-                                - condition: template
-                                  value_template: "{{ state_attr(hum_ent, 'mode') != 'sleep' }}"
-                              then:
-                                - service: humidifier.set_mode
-                                  target:
-                                    entity_id: "{{ hum_ent }}"
-                                  data:
-                                    mode: "sleep"
+                                - variables:
+                                    boot_off_switches: >-
+                                      {% set ns = namespace(items=[]) %}
+                                      {% if sound_ent != '' and not is_state(sound_ent, 'off') %}{% set ns.items = ns.items + [sound_ent] %}{% endif %}
+                                      {% if backlight_ent != '' and not is_state(backlight_ent, 'off') %}{% set ns.items = ns.items + [backlight_ent] %}{% endif %}
+                                      {{ ns.items }}
+                                    boot_on_switches: >-
+                                      {% set ns = namespace(items=[]) %}
+                                      {% if child_lock_ent != '' and not is_state(child_lock_ent, 'on') %}{% set ns.items = ns.items + [child_lock_ent] %}{% endif %}
+                                      {% if ioniser_ent != '' and not is_state(ioniser_ent, 'on') %}{% set ns.items = ns.items + [ioniser_ent] %}{% endif %}
+                                      {% if warm_stream_ent != '' and not is_state(warm_stream_ent, 'on') %}{% set ns.items = ns.items + [warm_stream_ent] %}{% endif %}
+                                      {{ ns.items }}
+                                - if:
+                                    - condition: template
+                                      value_template: "{{ (boot_off_switches | count) > 0 }}"
+                                  then:
+                                    - service: switch.turn_off
+                                      target:
+                                        entity_id: "{{ boot_off_switches }}"
+                                - if:
+                                    - condition: template
+                                      value_template: "{{ (boot_on_switches | count) > 0 }}"
+                                  then:
+                                    - service: switch.turn_on
+                                      target:
+                                        entity_id: "{{ boot_on_switches }}"
+                                - if:
+                                    - condition: template
+                                      value_template: "{{ state_attr(hum_ent, 'mode') != 'sleep' }}"
+                                  then:
+                                    - service: humidifier.set_mode
+                                      target:
+                                        entity_id: "{{ hum_ent }}"
+                                      data:
+                                        mode: "sleep"
 
                     # ── ВЕТКА РАБОТЫ (recommended >= 1 и устройство уже включено) ──
                     - conditions:
@@ -1762,7 +1806,7 @@ automation:
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         to: "on"
         for:
-          seconds: 25
+          seconds: 12
         id: "unexpected_power_on"
       - platform: state
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
@@ -1814,12 +1858,6 @@ automation:
                 {% endif %}
               {% else %}
                 {% if rec >= 1 and dev_can_run %}
-                  {% set ns.needed = true %}
-                {% elif age > 15 and (
-                      (cl != '' and is_state(cl, 'off'))
-                      or (snd != '' and is_state(snd, 'on'))
-                      or (bl != '' and is_state(bl, 'on'))
-                    ) %}
                   {% set ns.needed = true %}
                 {% endif %}
               {% endif %}
@@ -2021,9 +2059,13 @@ automation:
       - condition: state
         entity_id: input_boolean.humidifier_needs_refill
         state: "on"
-      - condition: state
-        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
-        state: "off"
+      - condition: template
+        value_template: "{{ (state_attr('automation.humidity_refill_detected', 'current') | int(0)) == 0 }}"
+      - condition: template
+        value_template: >-
+          {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank %}
+          {{ is_state('binary_sensor.humidifier_puh_9105_puh_2709_water_tank', 'off')
+             or (t is not none and (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 150) }}
 
       - service: input_boolean.turn_off
         target:
@@ -2141,7 +2183,7 @@ automation:
                   {% set nr = states['input_boolean.humidifier_needs_refill'] %}
                   {% set nr_on = (nr is not none and nr.state == 'on') %}
                   {% set since_empty = (as_timestamp(trigger.from_state.last_changed) - as_timestamp(nr.last_changed)) if (nr_on and trigger.from_state is not none) else 9999 %}
-                  {{ dur >= 10 and (not nr_on or since_empty > 2 or dur > 75) }}
+                  {{ dur >= 15 and (not nr_on or since_empty > 10 or dur > 75) }}
           - and:
               - condition: trigger
                 id: "power_on_20s"
@@ -2157,6 +2199,11 @@ automation:
               - condition: trigger
                 id: "tank_replaced"
             sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power
+              - delay:
+                  seconds: 1
               - service: humidifier.set_mode
                 target:
                   entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
@@ -2167,30 +2214,20 @@ automation:
               - if:
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
-                    state: "off"
+                    state: "on"
                 then:
+                  - service: switch.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id:
+                        - switch.humidifier_puh_9105_puh_2709_sound
+                        - switch.humidifier_puh_9105_puh_2709_backlight
                   - service: switch.turn_on
+                    continue_on_error: true
                     target:
-                      entity_id: switch.humidifier_puh_9105_puh_2709_power
-                  - delay:
-                      seconds: 1
-                  - service: humidifier.set_mode
-                    target:
-                      entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
-                    data:
-                      mode: "sleep"
-              - service: switch.turn_off
-                continue_on_error: true
-                target:
-                  entity_id:
-                    - switch.humidifier_puh_9105_puh_2709_sound
-                    - switch.humidifier_puh_9105_puh_2709_backlight
-              - service: switch.turn_on
-                continue_on_error: true
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
+                      entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
               - delay:
-                  seconds: 12
+                  seconds: 14
               - if:
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
@@ -2205,9 +2242,15 @@ automation:
                     target:
                       entity_id: script.humidifier_eva_confirm_refill
                 else:
-                  - service: switch.turn_off
-                    target:
-                      entity_id: switch.humidifier_puh_9105_puh_2709_power
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier', 'on')
+                             or is_state('switch.humidifier_puh_9105_puh_2709_power', 'on') }}
+                    then:
+                      - service: switch.turn_off
+                        target:
+                          entity_id: switch.humidifier_puh_9105_puh_2709_power
         default:
           - service: script.turn_on
             target:
@@ -2371,7 +2414,7 @@ automation:
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
         to: "on"
         for:
-          seconds: 25
+          seconds: 12
         id: "unexpected_power_on"
       - platform: state
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
@@ -2423,12 +2466,6 @@ automation:
                 {% endif %}
               {% else %}
                 {% if rec >= 1 and dev_can_run %}
-                  {% set ns.needed = true %}
-                {% elif age > 15 and (
-                      (cl != '' and is_state(cl, 'off'))
-                      or (snd != '' and is_state(snd, 'on'))
-                      or (bl != '' and is_state(bl, 'on'))
-                    ) %}
                   {% set ns.needed = true %}
                 {% endif %}
               {% endif %}
@@ -2520,9 +2557,13 @@ automation:
       - condition: state
         entity_id: input_boolean.humidifier_zap_needs_refill
         state: "on"
-      - condition: state
-        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2
-        state: "off"
+      - condition: template
+        value_template: "{{ (state_attr('automation.humidity_zap_refill_detected', 'current') | int(0)) == 0 }}"
+      - condition: template
+        value_template: >-
+          {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2 %}
+          {{ is_state('binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2', 'off')
+             or (t is not none and (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 150) }}
 
       - service: input_boolean.turn_off
         target:
@@ -2640,7 +2681,7 @@ automation:
                   {% set nr = states['input_boolean.humidifier_zap_needs_refill'] %}
                   {% set nr_on = (nr is not none and nr.state == 'on') %}
                   {% set since_empty = (as_timestamp(trigger.from_state.last_changed) - as_timestamp(nr.last_changed)) if (nr_on and trigger.from_state is not none) else 9999 %}
-                  {{ dur >= 10 and (not nr_on or since_empty > 2 or dur > 75) }}
+                  {{ dur >= 15 and (not nr_on or since_empty > 10 or dur > 75) }}
           - and:
               - condition: trigger
                 id: "power_on_20s"
@@ -2656,6 +2697,11 @@ automation:
               - condition: trigger
                 id: "tank_replaced"
             sequence:
+              - service: switch.turn_on
+                target:
+                  entity_id: switch.humidifier_puh_9105_puh_2709_power_2
+              - delay:
+                  seconds: 1
               - service: humidifier.set_mode
                 target:
                   entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
@@ -2666,30 +2712,20 @@ automation:
               - if:
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
-                    state: "off"
+                    state: "on"
                 then:
+                  - service: switch.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id:
+                        - switch.humidifier_puh_9105_puh_2709_sound_2
+                        - switch.humidifier_puh_9105_puh_2709_backlight_2
                   - service: switch.turn_on
+                    continue_on_error: true
                     target:
-                      entity_id: switch.humidifier_puh_9105_puh_2709_power_2
-                  - delay:
-                      seconds: 1
-                  - service: humidifier.set_mode
-                    target:
-                      entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
-                    data:
-                      mode: "sleep"
-              - service: switch.turn_off
-                continue_on_error: true
-                target:
-                  entity_id:
-                    - switch.humidifier_puh_9105_puh_2709_sound_2
-                    - switch.humidifier_puh_9105_puh_2709_backlight_2
-              - service: switch.turn_on
-                continue_on_error: true
-                target:
-                  entity_id: switch.humidifier_puh_9105_puh_2709_child_lock_2
+                      entity_id: switch.humidifier_puh_9105_puh_2709_child_lock_2
               - delay:
-                  seconds: 12
+                  seconds: 14
               - if:
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
@@ -2704,9 +2740,15 @@ automation:
                     target:
                       entity_id: script.humidifier_zap_confirm_refill
                 else:
-                  - service: switch.turn_off
-                    target:
-                      entity_id: switch.humidifier_puh_9105_puh_2709_power_2
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ is_state('humidifier.humidifier_puh_9105_puh_2709_humidifier_2', 'on')
+                             or is_state('switch.humidifier_puh_9105_puh_2709_power_2', 'on') }}
+                    then:
+                      - service: switch.turn_off
+                        target:
+                          entity_id: switch.humidifier_puh_9105_puh_2709_power_2
         default:
           - service: script.turn_on
             target:
@@ -2791,3 +2833,65 @@ automation:
 
             Текущая влажность (zap): {{ cur_humidity }}%
             Целевая влажность (zap): {{ states('sensor.humidity_zap_target_humidity') }}%
+
+  # ────────────────────────────────────────────────────────────────────────────
+  #  Мониторинг доступности увлажнителей (offline >= 10 мин / восстановление)
+  # ────────────────────────────────────────────────────────────────────────────
+  - id: humidity_device_offline_watchdog
+    alias: humidity_device_offline_watchdog
+    description: "Уведомление при потере связи с увлажнителем (>= 10 мин) и авто-сброс при возврате в сеть"
+    mode: parallel
+    max: 4
+    trigger:
+      - platform: state
+        entity_id:
+          - binary_sensor.humidifier_puh_9105_puh_2709_available
+          - binary_sensor.humidifier_puh_9105_puh_2709_available_2
+        to: "off"
+        for:
+          minutes: 10
+        id: "offline"
+      - platform: state
+        entity_id:
+          - binary_sensor.humidifier_puh_9105_puh_2709_available
+          - binary_sensor.humidifier_puh_9105_puh_2709_available_2
+        to: "on"
+        id: "online"
+    variables:
+      is_zap: "{{ (trigger.entity_id | default('')) is search('_2$') }}"
+      room_key: "{{ 'zap' if is_zap else 'eva' }}"
+      room_name: "{{ 'Зап (кабинет)' if is_zap else 'Ева (детская)' }}"
+      notify_tag: "{{ 'humidifier_offline_' ~ room_key }}"
+    action:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: "offline"
+            sequence:
+              - action: script.notify_dispatch
+                data:
+                  level: "p2_maintenance"
+                  tag: "{{ notify_tag }}"
+                  title: "⚠️ Увлажнитель {{ room_key }} офлайн"
+                  message: >
+                    Увлажнитель {{ room_name }} не выходит на связь более 10 минут.
+                    Проверьте питание устройства и подключение к Wi-Fi / MQTT.
+          - conditions:
+              - condition: trigger
+                id: "online"
+              - condition: template
+                value_template: >-
+                  {{ trigger.from_state is not none
+                     and trigger.from_state.state in ['off', 'unavailable']
+                     and (as_timestamp(now()) - as_timestamp(trigger.from_state.last_changed)) >= 600 }}
+            sequence:
+              - action: script.notify_clear
+                data:
+                  tag: "{{ notify_tag }}"
+                  clear_mobile: true
+              - action: script.notify_dispatch
+                data:
+                  level: "p2_maintenance"
+                  tag: "{{ notify_tag }}"
+                  title: "✅ Увлажнитель {{ room_key }} снова в сети"
+                  message: "Связь с увлажнителем {{ room_name }} восстановлена."

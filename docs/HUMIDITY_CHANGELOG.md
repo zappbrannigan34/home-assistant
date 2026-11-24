@@ -7,6 +7,28 @@
 
 ---
 
+## v4.4.5 (2026-11-24)
+
+**Version:** 4.4.5
+
+### Изменения: 100% радиотишина в Standby/ошибках, устранение шторма `child_lock ↔ low_water`, диагностика и offline watchdog
+
+1. **100% радиотишина в `Standby` (`mode == 0`) и при авариях (`low_water` / `needs_refill` / снятый бак):**
+   - Из `script.humidity_apply_area_control` удалена `else:`-ветка подстройки `child_lock`/`sound`/`backlight` в `Standby`, а при выключении с активной ошибкой/пустым баком (`has_fault_or_empty`) отправляется только `switch.turn_off(power)` без команд на `child_lock` и вспомогательные переключатели.
+   - Из `humidity_mode_enforcer` и `humidity_zap_mode_enforcer` удалена проверка `cl`/`snd`/`bl` при `humidifier == 'off'`, а `unexpected_power_on` сокращён с `25s` до `12s`.
+   - Исключён циклический шторм `child_lock ↔ low_water` (вызывавший зависание `zap` `MCU 1.0.3` и команды в снятый бак `eva` `MCU 1.0.9`).
+2. **Устранение 2-секундного ложного рестарта после `low_water` и корректный cold-start:**
+   - В ветке холодного старта `script.humidity_apply_area_control` добавлены `standby_settled` (`age >= 6s`), `delay: 3s` и живая повторная проверка условий перед пуском; пробуждение выполняется через `switch.turn_on(power)` → `1s` → `humidifier.set_mode("sleep")`, а пост-стартовые переключатели (`sound`/`backlight`/`child_lock`/`warm_stream`/`ioniser`) срабатывают только при `humidifier == 'on'`.
+3. **Защита автокалибровки и детектора заправки:**
+   - В `humidity_refill_detected` и `humidity_zap_refill_detected` ужесточён дебаунс `tank_replaced` (`dur >= 15s`, `since_empty > 10s`), пробуждение переведено на `switch.turn_on(power)` перед `mode: "sleep"`, а `sound`/`backlight`/`child_lock` защищены условием `humidifier == 'on'`.
+   - В `humidifier_calibrate_rates` и `humidifier_zap_calibrate_rates` после `delay: 3m` добавлена проверка `refill_detected.current == 0` и `water_tank == 'off' or last_changed >= 150s`.
+4. **Эффективная интенсивность, дашборд и offline watchdog:**
+   - Добавлены реактивные сенсоры `sensor.humidifier_effective_intensity` и `sensor.humidifier_zap_effective_intensity` (`6` в `sleep`, `0` в `Standby`, `unavailable` в офлайне).
+   - В `dashboards/humidity_dashboard.yaml` график интенсивности переведён на `effective_intensity` с `connectgaps: false`, исправлена кнопка `15m` (`count: 15`, было `count: 1`), в `Diagnostics` добавлены `Effective Intensity` и `Online`.
+   - Добавлена автоматизация `humidity_device_offline_watchdog` (`available == 'off'` на `10m` → `script.notify_dispatch` `p2_maintenance`; возврат после `>= 600s` → `script.notify_clear`).
+
+---
+
 ## v4.4.4 (2026-11-24)
 
 **Version:** 4.4.4

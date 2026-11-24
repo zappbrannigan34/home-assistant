@@ -76,14 +76,14 @@ views:
             showlegend: true
 
           # 3. Intensity (y3) — step line
-          - entity: number.humidifier_puh_9105_puh_2709_intensity_2
+          - entity: sensor.humidifier_zap_effective_intensity
             name: Intensity
             yaxis: y3
             line:
               color: '#AB47BC'
               width: 2
               shape: hv
-            connectgaps: true
+            connectgaps: false
             showlegend: true
 
         # LAYOUT — reads vars set by entities above
@@ -130,7 +130,7 @@ views:
             rangeselector:
               "y": 1.1
               buttons:
-                - count: 1
+                - count: 15
                   label: 15m
                   step: minute
                   stepmode: backward
@@ -305,6 +305,9 @@ views:
           - entity: sensor.humidity_zap_recommended_intensity
             name: Recommended Intensity
             icon: mdi:gauge
+          - entity: sensor.humidifier_zap_effective_intensity
+            name: Effective Intensity
+            icon: mdi:fan
           - entity: number.humidifier_puh_9105_puh_2709_intensity_2
             name: Intensity
             icon: mdi:fan
@@ -312,6 +315,9 @@ views:
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
             name: Device Mode
+          - entity: binary_sensor.humidifier_puh_9105_puh_2709_available_2
+            name: Online
+            icon: mdi:wifi
 
           - type: divider
 
@@ -419,14 +425,14 @@ views:
             showlegend: true
 
           # 3. Intensity (y3) — step line
-          - entity: number.humidifier_puh_9105_puh_2709_intensity
+          - entity: sensor.humidifier_effective_intensity
             name: Intensity
             yaxis: y3
             line:
               color: '#AB47BC'
               width: 2
               shape: hv
-            connectgaps: true
+            connectgaps: false
             showlegend: true
 
         # LAYOUT — reads vars set by entities above
@@ -473,7 +479,7 @@ views:
             rangeselector:
               "y": 1.1
               buttons:
-                - count: 1
+                - count: 15
                   label: 15m
                   step: minute
                   stepmode: backward
@@ -648,6 +654,9 @@ views:
           - entity: sensor.recommended_intensity
             name: Recommended Intensity
             icon: mdi:gauge
+          - entity: sensor.humidifier_effective_intensity
+            name: Effective Intensity
+            icon: mdi:fan
           - entity: number.humidifier_puh_9105_puh_2709_intensity
             name: Intensity
             icon: mdi:fan
@@ -655,6 +664,9 @@ views:
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
             name: Device Mode
+          - entity: binary_sensor.humidifier_puh_9105_puh_2709_available
+            name: Online
+            icon: mdi:wifi
 
           - type: divider
 
