@@ -1,0 +1,218 @@
+# package: canon_bx110_printer_notifications
+# Version: 1.0.0
+# Last Updated: 2026-11-24
+# Purpose: Уведомления в Telegram о низком уровне (<= 15%) и окончании (0%) чернил принтера Canon MAXIFY BX110
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT BOOLEANS (флаги отправленных уведомлений за цикл картриджа)
+#  ВАЖНО: без initial:, чтобы HA восстанавливал состояние из .storage после ночного рестарта
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_boolean:
+  canon_bx110_black_low_warned:
+    name: "Canon BX110 Black Ink Low Warned"
+    icon: mdi:printer-alert
+
+  canon_bx110_color_low_warned:
+    name: "Canon BX110 Color Ink Low Warned"
+    icon: mdi:printer-alert
+
+  canon_bx110_black_empty_warned:
+    name: "Canon BX110 Black Ink Empty Warned"
+    icon: mdi:printer-off
+
+  canon_bx110_color_empty_warned:
+    name: "Canon BX110 Color Ink Empty Warned"
+    icon: mdi:printer-off
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SCRIPT (единая отправка в Telegram с резервом на mobile_app)
+# ──────────────────────────────────────────────────────────────────────────────
+
+script:
+  printer_send_notification:
+    alias: "Уведомление принтера Canon BX110 (Telegram + резерв mobile_app)"
+    mode: queued
+    max: 10
+    fields:
+      title:
+        description: "Заголовок уведомления"
+        required: true
+      message:
+        description: "Текст уведомления"
+        required: true
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ states('notify.telegram_bot_8110302509_1002699581686') not in ['unavailable', 'none', ''] }}"
+        then:
+          - action: telegram_bot.send_message
+            continue_on_error: true
+            data:
+              entity_id: notify.telegram_bot_8110302509_1002699581686
+              title: "{{ title }}"
+              message: "{{ message }}"
+        else:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title }}"
+              message: "{{ message }}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  AUTOMATIONS
+# ──────────────────────────────────────────────────────────────────────────────
+
+automation:
+  # 1. Раннее предупреждение о низком уровне чернил (<= 15%, 1 раз за цикл картриджа)
+  - id: "Принтер Canon BX110 — предупреждение о низком уровне чернил"
+    alias: canon_bx110_ink_low_warning
+    description: >-
+      Отправляет однократное уведомление в Telegram, когда остаток чёрного или
+      цветного картриджа Canon BX110 опускается до 15% и ниже, с указанием модели
+      и артикула картриджа для покупки.
+    mode: queued
+    max: 4
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_black
+        below: 16
+        for:
+          minutes: 1
+        id: black
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_color
+        below: 16
+        for:
+          minutes: 1
+        id: color
+    conditions: []
+    actions:
+      - repeat:
+          for_each: >-
+            {{ [trigger.id] if (trigger is defined and trigger.id in ['black', 'color']) else ['black', 'color'] }}
+          sequence:
+            - variables:
+                is_black: "{{ repeat.item == 'black' }}"
+                level_ent: "{{ 'sensor.canon_bx110_series_black' if is_black else 'sensor.canon_bx110_series_color' }}"
+                low_bool: "{{ 'input_boolean.canon_bx110_black_low_warned' if is_black else 'input_boolean.canon_bx110_color_low_warned' }}"
+                empty_bool: "{{ 'input_boolean.canon_bx110_black_empty_warned' if is_black else 'input_boolean.canon_bx110_color_empty_warned' }}"
+                cartridge_label: "{{ 'чёрный' if is_black else 'цветной' }}"
+                cartridge_buy: "{{ 'Canon PGI-35 Black (арт. 1509B001)' if is_black else 'Canon CLI-36 Color (арт. 1511B001)' }}"
+                level_val: "{{ states(level_ent) | int(100) }}"
+                black_str: "{{ states('sensor.canon_bx110_series_black') ~ '%' if has_value('sensor.canon_bx110_series_black') else 'н/д' }}"
+                color_str: "{{ states('sensor.canon_bx110_series_color') ~ '%' if has_value('sensor.canon_bx110_series_color') else 'н/д' }}"
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ has_value(level_ent)
+                       and (states(level_ent) | int(100)) <= 15
+                       and (states(level_ent) | int(100)) > 0
+                       and is_state(low_bool, 'off')
+                       and is_state(empty_bool, 'off') }}
+              then:
+                - action: input_boolean.turn_on
+                  target:
+                    entity_id: "{{ low_bool }}"
+                - action: script.printer_send_notification
+                  data:
+                    title: "🖨️ Мало чернил Canon BX110: {{ cartridge_label }} ({{ level_val }}%)"
+                    message: >-
+                      Заканчивается {{ cartridge_label }} картридж ({{ level_val }}%, порог 15%).
+                      Купить: {{ cartridge_buy }}.
+                      Текущий остаток: цветной CLI-36 (1511B001) — {{ color_str }}, чёрный PGI-35 (1509B001) — {{ black_str }}.
+
+  # 2. Уведомление о полном окончании чернил (0%, 1 раз за цикл картриджа)
+  - id: "Принтер Canon BX110 — чернила полностью закончились"
+    alias: canon_bx110_ink_empty_alert
+    description: >-
+      Отправляет однократное уведомление в Telegram, когда остаток чёрного или
+      цветного картриджа Canon BX110 достигает 0%.
+    mode: queued
+    max: 4
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_black
+        below: 1
+        for:
+          minutes: 1
+        id: black
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_color
+        below: 1
+        for:
+          minutes: 1
+        id: color
+    conditions: []
+    actions:
+      - repeat:
+          for_each: >-
+            {{ [trigger.id] if (trigger is defined and trigger.id in ['black', 'color']) else ['black', 'color'] }}
+          sequence:
+            - variables:
+                is_black: "{{ repeat.item == 'black' }}"
+                level_ent: "{{ 'sensor.canon_bx110_series_black' if is_black else 'sensor.canon_bx110_series_color' }}"
+                low_bool: "{{ 'input_boolean.canon_bx110_black_low_warned' if is_black else 'input_boolean.canon_bx110_color_low_warned' }}"
+                empty_bool: "{{ 'input_boolean.canon_bx110_black_empty_warned' if is_black else 'input_boolean.canon_bx110_color_empty_warned' }}"
+                cartridge_label: "{{ 'чёрный' if is_black else 'цветной' }}"
+                cartridge_buy: "{{ 'Canon PGI-35 Black (арт. 1509B001)' if is_black else 'Canon CLI-36 Color (арт. 1511B001)' }}"
+                black_str: "{{ states('sensor.canon_bx110_series_black') ~ '%' if has_value('sensor.canon_bx110_series_black') else 'н/д' }}"
+                color_str: "{{ states('sensor.canon_bx110_series_color') ~ '%' if has_value('sensor.canon_bx110_series_color') else 'н/д' }}"
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ has_value(level_ent)
+                       and (states(level_ent) | int(100)) <= 0
+                       and is_state(empty_bool, 'off') }}
+              then:
+                - action: input_boolean.turn_on
+                  target:
+                    entity_id:
+                      - "{{ low_bool }}"
+                      - "{{ empty_bool }}"
+                - action: script.printer_send_notification
+                  data:
+                    title: "🛑 Закончились чернила Canon BX110: {{ cartridge_label }} (0%)"
+                    message: >-
+                      Полностью закончился {{ cartridge_label }} картридж (0%).
+                      Купить для замены: {{ cartridge_buy }}.
+                      Текущий остаток: цветной CLI-36 (1511B001) — {{ color_str }}, чёрный PGI-35 (1509B001) — {{ black_str }}.
+
+  # 3. Автоматический сброс флагов после замены картриджа (> 20%)
+  - id: "Принтер Canon BX110 — сброс флагов после замены картриджа"
+    alias: canon_bx110_ink_refill_reset
+    description: >-
+      Сбрасывает флаги предупреждений о чернилах, когда после установки нового
+      картриджа уровень поднимается выше 20%.
+    mode: parallel
+    max: 4
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_black
+        above: 20
+        for:
+          minutes: 1
+        id: black
+      - trigger: numeric_state
+        entity_id: sensor.canon_bx110_series_color
+        above: 20
+        for:
+          minutes: 1
+        id: color
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set is_black = trigger.id == 'black' %}
+          {% set low_bool = 'input_boolean.canon_bx110_black_low_warned' if is_black else 'input_boolean.canon_bx110_color_low_warned' %}
+          {% set empty_bool = 'input_boolean.canon_bx110_black_empty_warned' if is_black else 'input_boolean.canon_bx110_color_empty_warned' %}
+          {{ is_state(low_bool, 'on') or is_state(empty_bool, 'on') }}
+    actions:
+      - variables:
+          is_black: "{{ trigger.id == 'black' }}"
+          low_bool: "{{ 'input_boolean.canon_bx110_black_low_warned' if is_black else 'input_boolean.canon_bx110_color_low_warned' }}"
+          empty_bool: "{{ 'input_boolean.canon_bx110_black_empty_warned' if is_black else 'input_boolean.canon_bx110_color_empty_warned' }}"
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - "{{ low_bool }}"
+            - "{{ empty_bool }}"

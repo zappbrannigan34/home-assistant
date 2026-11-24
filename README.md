@@ -11,6 +11,7 @@
 |-------|----------|--------------|
 | `humidity` | Многокомнатное (`zap` + `eva`) управление увлажнителями Polaris PUH‑9105/PUH‑2709 по `area_devices`, адаптивная или персистентная ручная цель влажности. | [`packages/humidity/README.md`](packages/humidity/README.md) |
 | `ventilation` | ZAP cycle-identified PI с 10-минутным forecast, thermal cap и отдельным 30-минутным actuator gate; EVA сохраняет существующий controller. | [`packages/ventilation/README.md`](packages/ventilation/README.md) |
+| `printer` | Telegram-уведомления о низком уровне (`<= 15%`) и окончании (`0%`) чернил принтера Canon MAXIFY BX110 с артикулами картриджей и защитой от повторов. | [`packages/printer/README.md`](packages/printer/README.md) |
 
 > Новые пакеты добавляются в каталог `packages/` и в эту таблицу.
 
