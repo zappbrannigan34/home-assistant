@@ -1,7 +1,7 @@
 # package: puh_9105_humidity_multiroom
-# Version: 4.4.5
-# Last Updated: 2026-11-24
-# Changes: 100% radio silence in Standby/faults (eliminate child_lock<->low_water storm), 3s settle + live pre-start guard + power-first wake, tighten tank_replaced debounce and calibrate_rates guards, add effective_intensity sensors and offline watchdog
+# Version: 4.4.6
+# Last Updated: 2026-11-25
+# Changes: Fix MCU 1.0.9 Standby water-sensor silence & 43.1s dry-float latency (50s wait_for_trigger probe, 70s grace, daytime 15m/30m auto-probe, Telegram /refill_eva & /refill_zap buttons, instant manual_refill_toggle trigger)
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (целевой режим + состояние "бак пуст, ждём заправки")
@@ -410,7 +410,7 @@ template:
             {{ states('input_number.humidity_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.4.5"
+          controller_version: "4.4.6"
           area_id: "eva"
           target_mode: >
             {% if is_state('input_boolean.humidity_adaptive_target', 'on') %}
@@ -559,7 +559,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.4.5"
+          controller_version: "4.4.6"
           area_id: "eva"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -862,7 +862,7 @@ template:
             {{ states('input_number.humidity_zap_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.4.5"
+          controller_version: "4.4.6"
           area_id: "zap"
           target_mode: >
             {% if is_state('input_boolean.humidity_zap_adaptive_target', 'on') %}
@@ -1010,7 +1010,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.4.5"
+          controller_version: "4.4.6"
           area_id: "zap"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -1458,7 +1458,7 @@ script:
                        refill_ent != '' and is_state(refill_ent, 'on')
                        and is_state(hum_ent, 'on')
                        and (err_ent == '' or states(err_ent) in ['00', 'no_error', '02', 'child_lock', ''])
-                       and age < 30
+                       and age < 70
                      ) }}
 
             - if:
@@ -1845,7 +1845,7 @@ automation:
               {% set age = (as_timestamp(now()) - as_timestamp(lc)) if lc is not none else 999 %}
               {% if is_state(hum, 'on') %}
                 {% if rec == 0 or not dev_can_run %}
-                  {% if not (nr_on and age < 30) %}
+                  {% if not (nr_on and age < 70) %}
                     {% set ns.needed = true %}
                   {% endif %}
                 {% elif state_attr(hum, 'mode') != 'sleep'
@@ -1954,6 +1954,8 @@ automation:
           tag: "humidifier_water_{{ trigger.id }}"
           title: "⚠️ Мало воды в баке ({{ trigger.id }}) — {{ level }}%"
           message: "Осталось около {{ remaining_ml }} мл (~{{ hours_rem }} ч). Наполните бак водой — сброс и возобновление работы произойдут автоматически."
+          inline_keyboard:
+            - "✅ Бак заправлен:/refill_{{ trigger.id }}"
 
   # ══════════════════════════════════════════════════════════════════════════
   #  СИНХРОНИЗАЦИЯ РУЧНОГО СБРОСА needs_refill ЧЕРЕЗ UI-ТУМБЛЕР
@@ -2000,6 +2002,11 @@ automation:
       - service: input_boolean.turn_off
         target:
           entity_id: "{{ warn_bool }}"
+      - service: automation.trigger
+        target:
+          entity_id: "{{ 'automation.humidity_zap_control_main' if is_zap else 'automation.humidity_control_main' }}"
+        data:
+          skip_condition: false
       - action: script.notify_clear
         data:
           tag: "humidifier_water_{{ trigger.id }}"
@@ -2169,8 +2176,16 @@ automation:
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
         to: "on"
         for:
-          seconds: 20
-        id: "power_on_20s"
+          seconds: 55
+        id: "power_on_55s"
+      - platform: time_pattern
+        minutes: "/15"
+        id: "periodic_probe"
+      - platform: event
+        event_type: telegram_callback
+        event_data:
+          command: "/refill_eva"
+        id: "tg_refill"
 
     condition:
       - or:
@@ -2186,18 +2201,52 @@ automation:
                   {{ dur >= 15 and (not nr_on or since_empty > 10 or dur > 75) }}
           - and:
               - condition: trigger
-                id: "power_on_20s"
+                id: "power_on_55s"
               - condition: state
                 entity_id: input_boolean.humidifier_needs_refill
                 state: "on"
               - condition: template
                 value_template: "{{ states('sensor.humidifier_puh_9105_puh_2709_error') in ['00', 'no_error', '02', 'child_lock'] }}"
+          - and:
+              - condition: trigger
+                id: "periodic_probe"
+              - condition: state
+                entity_id: input_boolean.humidifier_needs_refill
+                state: "on"
+              - condition: state
+                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_available
+                state: "on"
+              - condition: state
+                entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+                state: "off"
+              - condition: template
+                value_template: >-
+                  {% set nr = states['input_boolean.humidifier_needs_refill'] %}
+                  {% set since_empty = (as_timestamp(now()) - as_timestamp(nr.last_changed)) if nr is not none else 0 %}
+                  {{ (states('sensor.recommended_intensity') | int(0)) >= 1
+                     and 9 <= now().hour < 22
+                     and since_empty >= 600 }}
+          - and:
+              - condition: trigger
+                id: "tg_refill"
+              - condition: state
+                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_available
+                state: "on"
 
     action:
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'tg_refill' and trigger.event is defined and trigger.event.data is defined and trigger.event.data.id is defined }}"
+        then:
+          - action: telegram_bot.answer_callback_query
+            continue_on_error: true
+            data:
+              callback_query_id: "{{ trigger.event.data.id }}"
+              message: "Проверяю воду и запускаю увлажнитель (eva)..."
       - choose:
           - conditions:
-              - condition: trigger
-                id: "tank_replaced"
+              - condition: template
+                value_template: "{{ trigger.id in ['tank_replaced', 'periodic_probe', 'tg_refill'] }}"
             sequence:
               - service: switch.turn_on
                 target:
@@ -2226,9 +2275,21 @@ automation:
                     continue_on_error: true
                     target:
                       entity_id: switch.humidifier_puh_9105_puh_2709_child_lock
-              - delay:
-                  seconds: 14
+              - wait_for_trigger:
+                  - platform: state
+                    entity_id: sensor.humidifier_puh_9105_puh_2709_error
+                    to:
+                      - "01"
+                      - "low_water"
+                  - platform: state
+                    entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
+                    to: "off"
+                timeout:
+                  seconds: 50
+                continue_on_timeout: true
               - if:
+                  - condition: template
+                    value_template: "{{ wait.trigger is none }}"
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier
                     state: "on"
@@ -2330,6 +2391,7 @@ automation:
           level: "{{ 'p3_info' if error_code in ['01', 'low_water'] else ('p2_maintenance' if error_code in ['03', 'replace_filter', '05', 'clean_tank'] else 'p1_urgent') }}"
           tag: "{{ 'humidifier_water_eva' if error_code in ['01', 'low_water'] else 'humidifier_error_eva' }}"
           title: "{{ error_title }}"
+          inline_keyboard: "{{ ['✅ Бак заправлен:/refill_eva'] if error_code in ['01', 'low_water'] else [] }}"
           message: >
             {{ error_message }}
 
@@ -2453,7 +2515,7 @@ automation:
               {% set age = (as_timestamp(now()) - as_timestamp(lc)) if lc is not none else 999 %}
               {% if is_state(hum, 'on') %}
                 {% if rec == 0 or not dev_can_run %}
-                  {% if not (nr_on and age < 30) %}
+                  {% if not (nr_on and age < 70) %}
                     {% set ns.needed = true %}
                   {% endif %}
                 {% elif state_attr(hum, 'mode') != 'sleep'
@@ -2667,8 +2729,16 @@ automation:
         entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
         to: "on"
         for:
-          seconds: 20
-        id: "power_on_20s"
+          seconds: 55
+        id: "power_on_55s"
+      - platform: time_pattern
+        minutes: "/30"
+        id: "periodic_probe"
+      - platform: event
+        event_type: telegram_callback
+        event_data:
+          command: "/refill_zap"
+        id: "tg_refill"
 
     condition:
       - or:
@@ -2684,18 +2754,52 @@ automation:
                   {{ dur >= 15 and (not nr_on or since_empty > 10 or dur > 75) }}
           - and:
               - condition: trigger
-                id: "power_on_20s"
+                id: "power_on_55s"
               - condition: state
                 entity_id: input_boolean.humidifier_zap_needs_refill
                 state: "on"
               - condition: template
                 value_template: "{{ states('sensor.humidifier_puh_9105_puh_2709_error_2') in ['00', 'no_error', '02', 'child_lock'] }}"
+          - and:
+              - condition: trigger
+                id: "periodic_probe"
+              - condition: state
+                entity_id: input_boolean.humidifier_zap_needs_refill
+                state: "on"
+              - condition: state
+                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_available_2
+                state: "on"
+              - condition: state
+                entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
+                state: "off"
+              - condition: template
+                value_template: >-
+                  {% set nr = states['input_boolean.humidifier_zap_needs_refill'] %}
+                  {% set since_empty = (as_timestamp(now()) - as_timestamp(nr.last_changed)) if nr is not none else 0 %}
+                  {{ (states('sensor.humidity_zap_recommended_intensity') | int(0)) >= 1
+                     and 9 <= now().hour < 22
+                     and since_empty >= 900 }}
+          - and:
+              - condition: trigger
+                id: "tg_refill"
+              - condition: state
+                entity_id: binary_sensor.humidifier_puh_9105_puh_2709_available_2
+                state: "on"
 
     action:
+      - if:
+          - condition: template
+            value_template: "{{ trigger.id == 'tg_refill' and trigger.event is defined and trigger.event.data is defined and trigger.event.data.id is defined }}"
+        then:
+          - action: telegram_bot.answer_callback_query
+            continue_on_error: true
+            data:
+              callback_query_id: "{{ trigger.event.data.id }}"
+              message: "Проверяю воду и запускаю увлажнитель (zap)..."
       - choose:
           - conditions:
-              - condition: trigger
-                id: "tank_replaced"
+              - condition: template
+                value_template: "{{ trigger.id in ['tank_replaced', 'periodic_probe', 'tg_refill'] }}"
             sequence:
               - service: switch.turn_on
                 target:
@@ -2724,9 +2828,21 @@ automation:
                     continue_on_error: true
                     target:
                       entity_id: switch.humidifier_puh_9105_puh_2709_child_lock_2
-              - delay:
-                  seconds: 14
+              - wait_for_trigger:
+                  - platform: state
+                    entity_id: sensor.humidifier_puh_9105_puh_2709_error_2
+                    to:
+                      - "01"
+                      - "low_water"
+                  - platform: state
+                    entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
+                    to: "off"
+                timeout:
+                  seconds: 50
+                continue_on_timeout: true
               - if:
+                  - condition: template
+                    value_template: "{{ wait.trigger is none }}"
                   - condition: state
                     entity_id: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
                     state: "on"
@@ -2828,6 +2944,7 @@ automation:
           level: "{{ 'p3_info' if error_code in ['01', 'low_water'] else ('p2_maintenance' if error_code in ['03', 'replace_filter', '05', 'clean_tank'] else 'p1_urgent') }}"
           tag: "{{ 'humidifier_water_zap' if error_code in ['01', 'low_water'] else 'humidifier_error_zap' }}"
           title: "{{ error_title }}"
+          inline_keyboard: "{{ ['✅ Бак заправлен:/refill_zap'] if error_code in ['01', 'low_water'] else [] }}"
           message: >
             {{ error_message }}
 

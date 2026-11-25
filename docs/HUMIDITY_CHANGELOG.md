@@ -7,6 +7,21 @@
 
 ---
 
+## v4.4.6 (2026-11-25)
+
+**Version:** 4.4.6
+
+### Изменения: надёжное обнаружение заправки на `MCU 1.0.9` (`eva`) и при верхнем доливе без снятия бака
+
+1. **Проба воды `wait_for_trigger` `50s` и грейс `70s` (`humidity_refill_detected`, `humidity_zap_refill_detected`, `refill_probe_grace`, `mode_enforcer`):**
+   - На `eva` (`devtype 70 / MCU 1.0.9`) задержка срабатывания поплавка `low_water` при пустом баке составляет `43.1s` (прежняя `14s`-проба ложно сбрасывала `needs_refill`, а при доливе без снятия бака или в `Standby` `MCU 1.0.9` не шлёт MQTT-событий).
+   - Окно пробы переведено с фиксированного `14s` на `wait_for_trigger` (`timeout: 50s`) с мгновенным выходом при `low_water` / `off`, грейс-окно `refill_probe_grace` и `mode_enforcer` расширено до `70s`, `power_on_20s` увеличен до `55s`.
+2. **Дневная автопроверка заправки и кнопка в Telegram:**
+   - В `humidity_refill_detected` (`eva`, каждые 15 мин) и `humidity_zap_refill_detected` (`zap`, каждые 30 мин) добавлен дневной `periodic_probe` (`09:00–22:00`, при `needs_refill = on`, `available = on`, `humidifier = off`, `recommended >= 1`, не ранее чем через 10/15 мин после опустошения).
+   - В уведомления о низком уровне воды добавлена inline-кнопка Telegram **`✅ Бак заправлен`** (`/refill_eva` и `/refill_zap`), запускающая немедленную пробу и старт, а `humidity_manual_refill_toggle` сразу триггерит `control_main`.
+
+---
+
 ## v4.4.5 (2026-11-24)
 
 **Version:** 4.4.5

@@ -38,6 +38,7 @@
 - `script.humidity_enforce_area_mode` — удерживает ночной режим (`mode: sleep`) и блокировку на всех включённых устройствах комнаты (в `Standby` соблюдается 100% радиотишина).
 - `script.humidity_apply_area_control` — применяет включение/выключение (`recommended_intensity`) ко всем готовым увлажнителям комнаты независимо (ошибка или снятый бак на одном устройстве не останавливает остальные в той же `area`), соблюдая 0 MQTT-команд в `Standby`/ошибках, 3-секундный settle перед холодным стартом и пробуждение через `switch.turn_on(power)` перед `mode: sleep`.
 - `automation.humidity_device_offline_watchdog` — отслеживает `binary_sensor.*_available*` и отправляет `p2_maintenance` через `script.notify_dispatch` при офлайне `>= 10 мин` (с автосбросом через `script.notify_clear`).
+- `automation.humidity_refill_detected` / `automation.humidity_zap_refill_detected` — обнаруживает заправку по снятию/установке бака (`water_tank`: `on → off`), по дневной автопроверке `09:00–22:00` (`periodic_probe`, на случай верхнего долива без снятия бака или молчания датчика `MCU 1.0.9` в `Standby`) или по кнопке Telegram `/refill_eva` / `/refill_zap`, с 50-секундной пробой `wait_for_trigger` (учитывает `43.1s` задержку поплавка `MCU 1.0.9`).
 
 ---
 
