@@ -1,7 +1,7 @@
 # package: puh_9105_humidity_multiroom
-# Version: 4.6.0
-# Last Updated: 2026-11-25
-# Changes: 24/7 HA-only PI+D 0..7 control in mode 'boost' (zero built-in Polaris automation), child_lock forced off, per-level 1..7 water tracking & calibration
+# Version: 4.6.1
+# Last Updated: 2026-11-26
+# Changes: Fix calibration_cycles freeze at 11 (cycles + 1, max 10000) and replace 3m refill-abort delay with 10s closed-tank guard
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (целевой режим + состояние "бак пуст, ждём заправки")
@@ -70,7 +70,7 @@ input_number:
   humidifier_calibration_cycles:
     name: "Humidifier Rate Calibration Cycles"
     min: 0
-    max: 20
+    max: 10000
     step: 1
     mode: box
 
@@ -95,7 +95,7 @@ input_number:
   humidifier_zap_calibration_cycles:
     name: "Humidifier Zap Rate Calibration Cycles"
     min: 0
-    max: 20
+    max: 10000
     step: 1
     mode: box
 
@@ -428,7 +428,7 @@ template:
             {{ states('input_number.humidity_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.6.0"
+          controller_version: "4.6.1"
           area_id: "eva"
           target_mode: >
             {% if is_state('input_boolean.humidity_adaptive_target', 'on') %}
@@ -588,7 +588,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.6.0"
+          controller_version: "4.6.1"
           area_id: "eva"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -904,7 +904,7 @@ template:
             {{ states('input_number.humidity_zap_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.6.0"
+          controller_version: "4.6.1"
           area_id: "zap"
           target_mode: >
             {% if is_state('input_boolean.humidity_zap_adaptive_target', 'on') %}
@@ -1063,7 +1063,7 @@ template:
 
           {{ target_intensity | int }}
         attributes:
-          controller_version: "4.6.0"
+          controller_version: "4.6.1"
           area_id: "zap"
           device_count: >
             {% set ns = namespace(cnt=0) %}
@@ -2138,21 +2138,30 @@ automation:
 
     condition:
       - condition: template
-        value_template: "{{ trigger.from_state is not none and trigger.from_state.state in ['00', 'no_error', '02', 'child_lock'] }}"
+        value_template: "{{ trigger.from_state is not none and trigger.from_state.state in ['00', 'no_error', '02', 'child_lock', ''] }}"
       - condition: state
         entity_id: input_boolean.humidifier_full_cycle_valid
         state: "on"
+      - condition: state
+        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
+        state: "off"
+      - condition: template
+        value_template: >-
+          {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank %}
+          {{ t is none or (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 30 }}
       - condition: numeric_state
         entity_id: sensor.humidifier_water_consumed
         above: 2500
-        below: 7500
+        below: 9000
 
     action:
       - variables:
           capacity: "{{ states('input_number.humidifier_tank_capacity_ml') | float(5000) }}"
           model_consumed: "{{ states('sensor.humidifier_water_consumed') | float(0) }}"
           cycles: "{{ states('input_number.humidifier_calibration_cycles') | int(0) }}"
-          capped_cycles: "{{ [cycles, 10] | min }}"
+          next_cycle: "{{ (cycles | int(0)) + 1 }}"
+          capped_cycles: "{{ [cycles | int(0), 10] | min }}"
+          cycle_start_snap: "{{ states('input_datetime.humidifier_cycle_start') }}"
           correction: "{{ ([[(capacity / model_consumed), 0.70] | max, 1.35] | min) | round(4) if model_consumed > 0 else 1.0 }}"
           h1: "{{ states('sensor.humidifier_level_1_hours') | float(0) }}"
           h2: "{{ states('sensor.humidifier_level_2_hours') | float(0) }}"
@@ -2162,22 +2171,23 @@ automation:
           h6: "{{ states('sensor.humidifier_level_6_hours') | float(0) }}"
           h7: "{{ states('sensor.humidifier_level_7_hours') | float(0) }}"
 
-      - delay: "00:03:00"
+      - delay: "00:00:10"
 
       - condition: state
-        entity_id: input_boolean.humidifier_needs_refill
-        state: "on"
-      - condition: template
-        value_template: "{{ (state_attr('automation.humidity_refill_detected', 'current') | int(0)) == 0 }}"
+        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
+        state: "off"
       - condition: template
         value_template: >-
           {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank %}
-          {{ is_state('binary_sensor.humidifier_puh_9105_puh_2709_water_tank', 'off')
-             or (t is not none and (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 150) }}
+          {{ t is none or (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 40 }}
 
-      - service: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.humidifier_full_cycle_valid
+      - if:
+          - condition: template
+            value_template: "{{ states('input_datetime.humidifier_cycle_start') == cycle_start_snap }}"
+        then:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.humidifier_full_cycle_valid
 
       - service: input_text.set_value
         target:
@@ -2194,8 +2204,8 @@ automation:
             {%- set ns = namespace(result={}) -%}
             {%- for k in ['1','2','3','4','5','6','7'] -%}
               {%- set nom = defaults[k] | float -%}
-              {%- set min_r = nom * 0.55 -%}
-              {%- set max_r = nom * 1.30 -%}
+              {%- set min_r = nom * 0.45 -%}
+              {%- set max_r = nom * 1.35 -%}
               {%- set old_rate = r[k] | default(nom) | float -%}
               {%- set hrs = h[k] | float(0) -%}
               {%- if hrs > 0.1 -%}
@@ -2214,7 +2224,7 @@ automation:
         target:
           entity_id: input_number.humidifier_calibration_cycles
         data:
-          value: "{{ capped_cycles + 1 }}"
+          value: "{{ next_cycle }}"
 
       - service: input_text.set_value
         target:
@@ -2224,7 +2234,7 @@ automation:
             {%- set h = {"1": h1 | float(0), "2": h2 | float(0), "3": h3 | float(0), "4": h4 | float(0), "5": h5 | float(0), "6": h6 | float(0), "7": h7 | float(0)} -%}
             {{- {"correction": correction | float | round(4),
                 "model_ml": model_consumed | float | round(0),
-                "cycle": (capped_cycles + 1) | int,
+                "cycle": next_cycle | int,
                 "level_hours": h,
                 "timestamp": now().isoformat()} | to_json -}}
 
@@ -2234,7 +2244,7 @@ automation:
           tag: "humidifier_calibration_eva"
           title: "📊 Калибровка расхода увлажнителя (eva)"
           message: >-
-            Бак {{ capacity | round(0) }} мл опустошён. Модель насчитала: {{ model_consumed | round(0) }} мл (коррекция ×{{ correction }}, цикл {{ capped_cycles + 1 }}).
+            Бак {{ capacity | round(0) }} мл опустошён. Модель насчитала: {{ model_consumed | round(0) }} мл (коррекция ×{{ correction }}, цикл {{ next_cycle }}).
 
   # ══════════════════════════════════════════════════════════════════════════
   #  EVA — ОБНАРУЖЕНИЕ ЗАПРАВКИ (снятие+установка бака + тихая проба 50с)
@@ -2686,21 +2696,30 @@ automation:
 
     condition:
       - condition: template
-        value_template: "{{ trigger.from_state is not none and trigger.from_state.state in ['00', 'no_error', '02', 'child_lock'] }}"
+        value_template: "{{ trigger.from_state is not none and trigger.from_state.state in ['00', 'no_error', '02', 'child_lock', ''] }}"
       - condition: state
         entity_id: input_boolean.humidifier_zap_full_cycle_valid
         state: "on"
+      - condition: state
+        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2
+        state: "off"
+      - condition: template
+        value_template: >-
+          {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2 %}
+          {{ t is none or (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 30 }}
       - condition: numeric_state
         entity_id: sensor.humidifier_zap_water_consumed
         above: 2500
-        below: 7500
+        below: 9000
 
     action:
       - variables:
           capacity: "{{ states('input_number.humidifier_zap_tank_capacity_ml') | float(5000) }}"
           model_consumed: "{{ states('sensor.humidifier_zap_water_consumed') | float(0) }}"
           cycles: "{{ states('input_number.humidifier_zap_calibration_cycles') | int(0) }}"
-          capped_cycles: "{{ [cycles, 10] | min }}"
+          next_cycle: "{{ (cycles | int(0)) + 1 }}"
+          capped_cycles: "{{ [cycles | int(0), 10] | min }}"
+          cycle_start_snap: "{{ states('input_datetime.humidifier_zap_cycle_start') }}"
           correction: "{{ ([[(capacity / model_consumed), 0.70] | max, 1.35] | min) | round(4) if model_consumed > 0 else 1.0 }}"
           h1: "{{ states('sensor.humidifier_zap_level_1_hours') | float(0) }}"
           h2: "{{ states('sensor.humidifier_zap_level_2_hours') | float(0) }}"
@@ -2710,22 +2729,23 @@ automation:
           h6: "{{ states('sensor.humidifier_zap_level_6_hours') | float(0) }}"
           h7: "{{ states('sensor.humidifier_zap_level_7_hours') | float(0) }}"
 
-      - delay: "00:03:00"
+      - delay: "00:00:10"
 
       - condition: state
-        entity_id: input_boolean.humidifier_zap_needs_refill
-        state: "on"
-      - condition: template
-        value_template: "{{ (state_attr('automation.humidity_zap_refill_detected', 'current') | int(0)) == 0 }}"
+        entity_id: binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2
+        state: "off"
       - condition: template
         value_template: >-
           {% set t = states.binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2 %}
-          {{ is_state('binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2', 'off')
-             or (t is not none and (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 150) }}
+          {{ t is none or (as_timestamp(now()) - as_timestamp(t.last_changed)) >= 40 }}
 
-      - service: input_boolean.turn_off
-        target:
-          entity_id: input_boolean.humidifier_zap_full_cycle_valid
+      - if:
+          - condition: template
+            value_template: "{{ states('input_datetime.humidifier_zap_cycle_start') == cycle_start_snap }}"
+        then:
+          - service: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.humidifier_zap_full_cycle_valid
 
       - service: input_text.set_value
         target:
@@ -2742,8 +2762,8 @@ automation:
             {%- set ns = namespace(result={}) -%}
             {%- for k in ['1','2','3','4','5','6','7'] -%}
               {%- set nom = defaults[k] | float -%}
-              {%- set min_r = nom * 0.55 -%}
-              {%- set max_r = nom * 1.30 -%}
+              {%- set min_r = nom * 0.45 -%}
+              {%- set max_r = nom * 1.35 -%}
               {%- set old_rate = r[k] | default(nom) | float -%}
               {%- set hrs = h[k] | float(0) -%}
               {%- if hrs > 0.1 -%}
@@ -2762,7 +2782,7 @@ automation:
         target:
           entity_id: input_number.humidifier_zap_calibration_cycles
         data:
-          value: "{{ capped_cycles + 1 }}"
+          value: "{{ next_cycle }}"
 
       - service: input_text.set_value
         target:
@@ -2772,7 +2792,7 @@ automation:
             {%- set h = {"1": h1 | float(0), "2": h2 | float(0), "3": h3 | float(0), "4": h4 | float(0), "5": h5 | float(0), "6": h6 | float(0), "7": h7 | float(0)} -%}
             {{- {"correction": correction | float | round(4),
                 "model_ml": model_consumed | float | round(0),
-                "cycle": (capped_cycles + 1) | int,
+                "cycle": next_cycle | int,
                 "level_hours": h,
                 "timestamp": now().isoformat()} | to_json -}}
 
@@ -2782,7 +2802,7 @@ automation:
           tag: "humidifier_calibration_zap"
           title: "📊 Калибровка расхода увлажнителя (zap)"
           message: >-
-            Бак {{ capacity | round(0) }} мл опустошён. Модель насчитала: {{ model_consumed | round(0) }} мл (коррекция ×{{ correction }}, цикл {{ capped_cycles + 1 }}).
+            Бак {{ capacity | round(0) }} мл опустошён. Модель насчитала: {{ model_consumed | round(0) }} мл (коррекция ×{{ correction }}, цикл {{ next_cycle }}).
 
   # ══════════════════════════════════════════════════════════════════════════
   #  ZAP — ОБНАРУЖЕНИЕ ЗАПРАВКИ (снятие+установка бака + тихая проба 50с)
