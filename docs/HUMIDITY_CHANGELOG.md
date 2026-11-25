@@ -7,6 +7,26 @@
 
 ---
 
+## v4.6.0 (2026-11-25)
+
+**Version:** 4.6.0
+
+### Изменения: 100% управление из Home Assistant (`mode: "boost"`, скорости `1..7`), `child_lock: off` и поуровневый учёт воды
+
+1. **Отказ от встроенной автоматики Polaris (`sleep` полностью удалён) и перевод 24/7 в `mode: "boost"` (`"5"`):**
+   - В `script.humidity_apply_area_control`, `humidity_*_mode_enforcer` и пробе заправки `humidity_*_refill_detected` удалён `mode: "sleep"` (`4`), который включал внутренний авто-алгоритм увлажнителя и игнорировал `1..7`.
+   - Рабочий режим — **`mode: "boost"` (`"5"`, программа `"Интенсивность"`, `limits.humidity = 0`, внутренний гигростат полностью отключён, `limits.speed = 1..7`, `switch.*_power` корректно отражает `'on'` в `polaris/switch.py:850`)**.
+2. **Полный PI+D-регулятор `0..7` с гистерезисом включения/выключения (`sensor.recommended_intensity`, `sensor.humidity_zap_recommended_intensity`):**
+   - При `error > 1.5` или `predicted_error > 1.5` немедленно задаётся максимальная скорость **`7`** (100% физическая мощность), около цели скорость плавно модулируется в диапазоне `1..7`, а пороги входа (`error >= 0.30` или `error >= 0.15 and predicted_error >= 0.45`) и выхода (`error <= -0.45` или `error <= -0.15 and predicted_error <= -0.55`) исключают дребезг `0 ↔ 1`.
+   - `sensor.humidifier_effective_intensity` и `sensor.humidifier_zap_effective_intensity` переведены на реактивный `trigger:`-шаблон и честно показывают фактический `number.*_intensity*` (`1..7`, или `0` в `Standby`/ошибке).
+3. **`child_lock` принудительно выключен (`off`) на обоих устройствах:**
+   - При работе и холодном старте `child_lock`, `backlight` и `sound` удерживаются в `off` (`humidity_*_mode_enforcer` отслеживает `child_lock: on` на `10s`), что убирает мигание индикатора `ON/OFF` каждые 5 с в темноте (руководство стр. 21) и конфликт кода `02` на `devtype 17` (`zap`), сохраняя 100% радиотишину в `Standby` и при ошибках.
+4. **Восстановление поуровневого учёта воды и калибровки (`1..7`):**
+   - Восстановлены `input_text.humidifier_*_consumption_rates` (без `initial:`) и 14 `history_stats` сенсоров `level_1..7_hours` (при сохранении `active_hours`); удалены `input_number.humidifier_*_evaporation_rate_ml_h`.
+   - Обновлён `dashboards/humidity_dashboard.yaml` (`yaxis3: [-0.5, 7.8]`, `Recommended/Effective/Device Intensity`, `Operating Mode`, `Child Lock`, `Current Rate`).
+
+---
+
 ## v4.5.0 (2026-11-25)
 
 **Version:** 4.5.0

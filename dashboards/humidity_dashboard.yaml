@@ -75,9 +75,9 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Mist Output (y3) — step line (0% / 100%)
+          # 3. Effective Intensity (y3) — step line (0..7)
           - entity: sensor.humidifier_zap_effective_intensity
-            name: Mist Output
+            name: Effective Intensity
             yaxis: y3
             line:
               color: '#AB47BC'
@@ -180,12 +180,12 @@ views:
                 return [-padded, padded];
               }
 
-          # y3: Mist Output (0-100%) — hidden axis
+          # y3: Effective Intensity (0-7) — hidden axis
           yaxis3:
             visible: false
             overlaying: "y"
             fixedrange: true
-            range: [-5, 108]
+            range: [-0.5, 7.8]
 
         defaults:
           xaxes:
@@ -303,15 +303,24 @@ views:
           - entity: sensor.humidity_zap_rate
             name: Rate
           - entity: sensor.humidity_zap_recommended_intensity
-            name: Control Demand
+            name: Recommended Intensity
             icon: mdi:gauge
           - entity: sensor.humidifier_zap_effective_intensity
-            name: Mist Output
+            name: Effective Intensity
             icon: mdi:air-humidifier
+          - entity: number.humidifier_puh_9105_puh_2709_intensity_2
+            name: Device Intensity
           - entity: switch.humidifier_puh_9105_puh_2709_power_2
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
-            name: Device Mode
+            name: Device State
+          - type: attribute
+            entity: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
+            attribute: mode
+            name: Operating Mode
+            icon: mdi:cog-outline
+          - entity: switch.humidifier_puh_9105_puh_2709_child_lock_2
+            name: Child Lock
           - entity: binary_sensor.humidifier_puh_9105_puh_2709_available_2
             name: Online
             icon: mdi:wifi
@@ -336,9 +345,12 @@ views:
 
           - type: divider
 
-          - entity: input_number.humidifier_zap_evaporation_rate_ml_h
-            name: Evaporation Rate
+          - type: attribute
+            entity: sensor.humidifier_zap_water_level
+            attribute: current_rate_ml_h
+            name: Current Rate
             icon: mdi:water-sync
+            suffix: ml/h
           - entity: sensor.humidifier_zap_active_hours
             name: Active Hours
             icon: mdi:timer-play-outline
@@ -424,9 +436,9 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Mist Output (y3) — step line (0% / 100%)
+          # 3. Effective Intensity (y3) — step line (0..7)
           - entity: sensor.humidifier_effective_intensity
-            name: Mist Output
+            name: Effective Intensity
             yaxis: y3
             line:
               color: '#AB47BC'
@@ -529,12 +541,12 @@ views:
                 return [-padded, padded];
               }
 
-          # y3: Mist Output (0-100%) — hidden axis
+          # y3: Effective Intensity (0-7) — hidden axis
           yaxis3:
             visible: false
             overlaying: "y"
             fixedrange: true
-            range: [-5, 108]
+            range: [-0.5, 7.8]
 
         defaults:
           xaxes:
@@ -652,15 +664,24 @@ views:
           - entity: sensor.humidity_rate
             name: Rate
           - entity: sensor.recommended_intensity
-            name: Control Demand
+            name: Recommended Intensity
             icon: mdi:gauge
           - entity: sensor.humidifier_effective_intensity
-            name: Mist Output
+            name: Effective Intensity
             icon: mdi:air-humidifier
+          - entity: number.humidifier_puh_9105_puh_2709_intensity
+            name: Device Intensity
           - entity: switch.humidifier_puh_9105_puh_2709_power
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
-            name: Device Mode
+            name: Device State
+          - type: attribute
+            entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
+            attribute: mode
+            name: Operating Mode
+            icon: mdi:cog-outline
+          - entity: switch.humidifier_puh_9105_puh_2709_child_lock
+            name: Child Lock
           - entity: binary_sensor.humidifier_puh_9105_puh_2709_available
             name: Online
             icon: mdi:wifi
@@ -685,9 +706,12 @@ views:
 
           - type: divider
 
-          - entity: input_number.humidifier_evaporation_rate_ml_h
-            name: Evaporation Rate
+          - type: attribute
+            entity: sensor.humidifier_water_level
+            attribute: current_rate_ml_h
+            name: Current Rate
             icon: mdi:water-sync
+            suffix: ml/h
           - entity: sensor.humidifier_active_hours
             name: Active Hours
             icon: mdi:timer-play-outline

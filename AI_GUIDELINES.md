@@ -241,23 +241,23 @@ for e in data['data']['entities']:
 
 ---
 
-## Existing Package: `humidity` (v4.5.0)
+## Existing Package: `humidity` (v4.6.0)
 
 **Devices:** Polaris PUH-9105 / PUH-2709 (MQTT via `polaris-mqtt` integration) — multi-room `eva` (`*_humidifier`, `devtype 70`, `MCU 1.0.9`) + `zap` (`*_humidifier_2`, `devtype 17`, `MCU 1.0.3`), area-driven via `area_devices('eva')` / `area_devices('zap')`.
 
-Честный предиктивный ON/OFF-регулятор (`0%` / `100%`, без фиктивной шкалы `0..7` и хардкода `6`) для удержания целевой влажности по комнатам и `area_devices`. Включает:
+100% HA-управляемый PI+D-регулятор (`0..7`, с гистерезисом ON/OFF) в ручном режиме интенсивности `mode: "boost"` (`"5"`, встроенный гигростат и авто-режимы отключены) для удержания целевой влажности по комнатам и `area_devices`. Включает:
 
 - Независимые контуры для комнат **`eva`** (legacy entity IDs сохранены) и **`zap`** (`*_zap_*`) со сглаживанием сигнала влажности (`platform: filter` `lowpass` τ≈3 мин + `platform: derivative` 5 мин: `sensor.humidity_filtered`, `sensor.humidity_zap_filtered`)
-- Однописательную архитектуру (`mode: queued` в `humidity_*_control_main`, триггер по `to: ["0", "100"]`): `humidity_*_mode_enforcer` отслеживает дрейф `mode` (`sleep`), `warm_stream`/`ioniser`/`child_lock`/`backlight`/`sound`/питания (только при `humidifier == 'on'`, с защитой на время пробы заправки) и лишь триггерит `control_main` (`skip_condition: false`), исключая гонки при выключении
+- Однописательную архитектуру (`mode: queued` в `humidity_*_control_main`, триггер по `to: ["0".."7"]`): `humidity_*_mode_enforcer` отслеживает дрейф `mode` (`boost`), `intensity` (`32s`), `warm_stream`/`ioniser`/`child_lock: on`/`backlight: on`/`sound: on`/питания (только при `humidifier == 'on'`, с защитой на время пробы заправки) и лишь триггерит `control_main` (`skip_condition: false`), исключая гонки при выключении
 - Переиспользуемые area-driven скрипты (`script.humidity_setup_area_devices`, `script.humidity_enforce_area_mode`, `script.humidity_apply_area_control`) — управляют всеми `humidifier.*` устройствами в `area_devices(area_name)` независимо:
-  - при `recommended == 0` или блокировке (`needs_refill`/`water_tank`/ошибка) выключают `power_ent` (`switch.turn_off` с `wait_template` и повтором), отправляя `child_lock: on` и `aux_off` только если нет аварии (`not has_fault_or_empty`), и соблюдают **100% радиотишину (`0` MQTT-команд)** в `Standby` (`mode == 0`) и при ошибках/снятом баке;
-  - при `recommended >= 1` (cold-start) выдерживают `standby_settled` (`age >= 6s`), `delay: 3s` и живую повторную проверку условий, затем будят через `switch.turn_on(power)` → `1s` → `humidifier.set_mode("sleep")` и выставляют `warm_stream: on`, `ioniser: on`, `child_lock: on`, `sound: off`, `backlight: off` только если `humidifier == 'on'`
-- Режим **`Full Blackout & HA-Only Lockdown` (v4.4.3+):** `mode: "sleep"` (`4`, гасит цифровой экран и 6 кнопок через 15 с тишины) + `backlight: off` (гасит подсветку бака), `sound: off` и `child_lock: on` удерживаются во время активной работы, блокируя локальное сенсорное управление при сохранении полного MQTT-управления из HA
+  - при `recommended == 0` или блокировке (`needs_refill`/`water_tank`/ошибка) выключают `power_ent` (`switch.turn_off` с `wait_template` и повтором), выключая `aux_off` только если нет аварии (`not has_fault_or_empty`), и соблюдают **100% радиотишину (`0` MQTT-команд)** в `Standby` (`mode == 0`) и при ошибках/снятом баке;
+  - при `recommended >= 1` (cold-start) выдерживают `standby_settled` (`age >= 6s`), `delay: 3s` и живую повторную проверку условий, затем будят через `switch.turn_on(power)` → `1s` → `humidifier.set_mode("boost")` и выставляют `warm_stream: on`, `ioniser: on`, `child_lock: off`, `sound: off`, `backlight: off` и `number.set_value(intensity)` (`1..7`) только если `humidifier == 'on'`
+- **`mode: "boost"` (`5`) + `child_lock: off` (v4.6.0):** полностью отключает встроенный гигростат (`limits.humidity = 0`) и даёт прямое управление скоростью `1..7` из HA без `sleep`/`auto`; `child_lock` принудительно выключен (убирает мигание кнопки `ON/OFF` каждые 5 с по инструкции стр. 21 и конфликт кода `02` на `devtype 17`)
 - Адаптивную целевую влажность по комнатной температуре (`35–60%`, без уличного конденсатного урезания) или ручную целевую влажность (`input_number.humidity_target` / `input_number.humidity_zap_target`, 25–70%) с автопереключением (`automation.humidity_manual_target_autoswitch`) при вводе на дашборде
-- Все `input_boolean`, `input_number`, `input_text`, `input_datetime` пакета объявлены **без `initial:`**, чтобы ручная цель, режим, ставка `evaporation_rate_ml_h` и калибровка полностью сохранялись между перезагрузками HA
+- Все `input_boolean`, `input_number`, `input_text`, `input_datetime` пакета объявлены **без `initial:`**, чтобы ручная цель, режим, таблица ставок `consumption_rates` и калибровка полностью сохранялись между перезагрузками HA
 - Особенности `polaris-mqtt v1.1.6` и ревизий Polaris PUH-9105 (`devtype 70 / MCU 1.0.9` vs `devtype 17 / MCU 1.0.3`):
-  - **Различия ревизий и индикация дисплея:** `eva` (`devtype 70`, `MCU 1.0.9`) имеет 2 счётчика `expendables` (`[4392, 168]`, фильтр + `CLEAN` 168 ч); `zap` (`devtype 17`, `MCU 1.0.3`) имеет 1 счётчик `expendables` (`[4392]`, без `CLEAN`). На **обеих** ревизиях `backlight = false` (`0x1C`) гасит **только подсветку бака**; лицевой LED-экран и 6 кнопок полностью гаснут через 15 с тишины **только в `mode = "4"` (`sleep`)** или в `Standby` (`"0"`). В `sleep` `number.set_value(intensity)` игнорируется (`state/intensity = 0`), а прибор при `warm_stream: on` работает на полной мощности (`~500–550 мл/ч`), поэтому модель воды опирается напрямую на калибруемый `input_number.humidifier_*_evaporation_rate_ml_h` и `sensor.humidifier_*_active_hours`, а `warm_stream`, `ioniser` и `child_lock` работают штатно
-  - **Баг `polaris/switch.py:850` для `mode = "6"`/`"7"`:** проверка `payload in ("1","01","2","3","4","5","true")` распознаёт `"4"` (`sleep`), но пропускает `"6"`/`"7"`; `humidifier.py:207` присваивает `self._attr_is_on = "0"` (truthy строка), поэтому для выключения используется **только** `switch.turn_off(power_ent)`
+  - **Различия ревизий:** `eva` (`devtype 70`, `MCU 1.0.9`) имеет 2 счётчика `expendables` (`[4392, 168]`, фильтр + `CLEAN` 168 ч); `zap` (`devtype 17`, `MCU 1.0.3`) имеет 1 счётчик `expendables` (`[4392]`, без `CLEAN`). На **обеих** ревизиях `backlight = false` (`0x1C`) гасит только подсветку бака, а `mode: "boost"` (`"5"`) держит скорости `1..7` с отключённым внутренним гигростатом (`limits.humidity = 0`)
+  - **Баг `polaris/switch.py:850` для `mode = "6"`/`"7"`:** проверка `payload in ("1","01","2","3","4","5","true")` распознаёт `"5"` (`boost`), но пропускает `"6"`/`"7"`; `humidifier.py:207` присваивает `self._attr_is_on = "0"` (truthy строка), поэтому для выключения используется **только** `switch.turn_off(power_ent)`
   - **Переходный пакет и `low_water`:** перед `state/mode = "0"` (~270 мс) прошивка кратковременно шлёт `mode: boost`, `humidity: 30` и сбрасывает `warm_stream`, а при `low_water` сбрасывает `child_lock → off` (иногда за 10–65 мс до `error/code = 01`). Отправка любых команд в `Standby` (`mode = 0`) или при `low_water` будит/подвешивает MCU (`child_lock ↔ low_water` шторм), поэтому в `Standby`/ошибках команды строго запрещены
   - **Wi-Fi MAC (U/L-бит) и баг `unique_id` в `polaris-mqtt v1.1.6`:** Wi-Fi STA MAC отличается от MQTT ID инверсией U/L-бита: `eva` `78:1c:3c:87:32:96` → STA `7a:1c:3c:87:32:96` (`192.168.88.105`), `zap` `98:f4:ab:da:17:83` → STA `9a:f4:ab:da:17:83` (`192.168.88.203`). В `v1.1.6` (`const.py:186`) модель сменилась с `PUH-9105/PUH-2709` на `PUH-9105_PUH-2709`, из-за чего старый `ConfigEntry` `eva` вызывал дублирующий MQTT discovery (`confirm`). Локально пропатчены `custom_components/polaris/__init__.py` (автомиграция `unique_id`) и `config_flow.py` (abort по `entry.data["DEVICEID"]`)
 - Предиктивный ON/OFF-закон с гистерезисом по 5-минутному прогнозу (`predicted_error = error - rate * 5`): при `prev_demand = false` включение (`100%`) при `error >= +0.30%` или (`error >= +0.10%` и `predicted_error >= +0.50%`); при `prev_demand = true` выключение (`0%`) при `error <= -0.35%` или (`error <= 0.0%` и `predicted_error <= -0.35%`)
@@ -275,17 +275,17 @@ for e in data['data']['entities']:
 | `weather.forecast_home_assistant` | Source | Погода (attr: temperature) |
 | `input_boolean.humidity_adaptive_target` / `input_boolean.humidity_zap_adaptive_target` | Input | Адаптивная цель (`on`) или ручная (`off`), без `initial:` |
 | `input_number.humidity_target` / `input_number.humidity_zap_target` | Input | Ручная целевая влажность 25–70%, без `initial:` |
-| `input_number.humidifier_evaporation_rate_ml_h` / `input_number.humidifier_zap_evaporation_rate_ml_h` | Input | Калиброванная ставка испарения (мл/ч), без `initial:` |
+| `input_text.humidifier_consumption_rates` / `input_text.humidifier_zap_consumption_rates` | Input | Поуровневая таблица расхода `1..7` (мл/ч JSON), без `initial:` |
 | `sensor.adaptive_target_humidity` / `sensor.humidity_zap_adaptive_target` | Template | Адаптивная целевая влажность (35–60%) |
 | `sensor.target_humidity` / `sensor.humidity_zap_target_humidity` | Template | Действующая целевая влажность (`eva` / `zap`) |
 | `sensor.humidity_error` / `sensor.humidity_zap_error` | Template | Ошибка: effective target − filtered |
 | `sensor.humidity_rate` / `sensor.humidity_zap_rate` | Template | Скорость изменения %/мин |
-| `sensor.recommended_intensity` / `sensor.humidity_zap_recommended_intensity` | Template | Предиктивный ON/OFF-запрос `0%` / `100%` (читает `area_devices`) |
-| `sensor.humidifier_effective_intensity` / `sensor.humidifier_zap_effective_intensity` | Template | Фактическая отдача (`100%` в `sleep`, `0%` в `Standby`/ошибке, `unavailable` в офлайне) |
-| `sensor.humidifier_active_hours` / `sensor.humidifier_zap_active_hours` | History Stats | Наработка `humidifier == 'on'` (ч) за текущий цикл |
+| `sensor.recommended_intensity` / `sensor.humidity_zap_recommended_intensity` | Template | PI+D запрос скорости `0..7` (читает `area_devices`) |
+| `sensor.humidifier_effective_intensity` / `sensor.humidifier_zap_effective_intensity` | Template | Фактическая скорость `number.*_intensity*` (`1..7` в `boost`, `0` в `Standby`/ошибке, `unavailable` в офлайне) |
+| `sensor.humidifier_active_hours` / `sensor.humidifier_zap_active_hours` | History Stats | Наработка `humidifier == 'on'` (ч) за текущий цикл (`+ level_1..7_hours`) |
 | `sensor.humidifier_water_level` / `sensor.humidifier_zap_water_level` | Template | Виртуальный уровень воды % (0% при `needs_refill`) |
 | `switch.humidifier_puh_9105_puh_2709_power` / `*_power_2` | Device | Питание вкл/выкл |
-| `humidifier.humidifier_puh_9105_puh_2709_humidifier` / `*_humidifier_2` | Device | Режим работы (`sleep`) |
+| `humidifier.humidifier_puh_9105_puh_2709_humidifier` / `*_humidifier_2` | Device | Режим работы (`boost`) |
 
 ### Automations
 
@@ -295,7 +295,7 @@ for e in data['data']['entities']:
 | `humidity_water_low_warning` | Предупреждение в Telegram/mobile при `<= 15%` (1 раз за цикл) |
 | `humidity_manual_refill_toggle` | Синхронизация `cycle_start`/`full_cycle_valid` при ручном сбросе `Needs Refill` |
 | `humidity_device_setup` / `humidity_zap_device_setup` | Инициализация устройств `eva` / `zap` по `area` |
-| `humidity_mode_enforcer` / `humidity_zap_mode_enforcer` | Сторож `home`, `backlight/sound: off`, `child_lock: on`, `intensity` и питания |
+| `humidity_mode_enforcer` / `humidity_zap_mode_enforcer` | Сторож `boost`, `backlight/sound/child_lock: off`, `intensity` и питания |
 | `humidity_control_main` / `humidity_zap_control_main` | Основная логика управления устройствами в `area` |
 | `humidifier_calibrate_rates` / `humidifier_zap_calibrate_rates` | Защищённая калибровка расхода при `low_water` (с 3-мин проверкой) |
 | `humidity_refill_detected` / `humidity_zap_refill_detected` | Автообнаружение заправки (`tank_replaced` + 15 с проба, fallback 20 с) |
