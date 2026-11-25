@@ -7,6 +7,27 @@
 
 ---
 
+## v4.5.0 (2026-11-25)
+
+**Version:** 4.5.0
+
+### Изменения: честный предиктивный ON/OFF-контур `sleep`-режима (`0%` / `100%`) и прямая калибровка расхода (`ml/h`)
+
+1. **Устранение фиктивной шкалы `0..7` и хардкода `else 6` (`packages/humidity/humidity_control.yaml`):**
+   - В `mode: "sleep"` (`4`, единственный режим с полным гашением дисплея и кнопок) прошивка игнорирует `control/intensity` (`1..7`), всегда шлёт `state/intensity = 0` и физически испаряет при `warm_stream: on` с полной мощностью (`~500–550 мл/ч`, подтверждено ночным циклом `zap`: `5000 мл` за `9.054 ч` = `552.2 мл/ч`).
+   - `sensor.recommended_intensity` (`eva`) и `sensor.humidity_zap_recommended_intensity` (`zap`) переведены в честный двухпозиционный предиктивный PD-гистерезис **`0` / `100` (`%`)** без интегрального насыщения (`integral_level`) и без зависимости от мёртвых `number.*_intensity*`: включение при `error >= +0.30%` или (`error >= +0.10%` и `predicted_error >= +0.50%`), выключение при `error <= -0.35%` или (`error <= 0.0%` и `predicted_error <= -0.35%`).
+   - `sensor.humidifier_effective_intensity` и `sensor.humidifier_zap_effective_intensity` переведены на честные **`0%` / `100%`** (`unit_of_measurement: "%"`, без `state_class`, без хардкода `6`).
+   - На триггерах `sensor.*recommended_intensity` в `humidity_control_main` и `humidity_zap_control_main` добавлен фильтр `to: ["0", "100"]`, исключающий лишние запуски при обновлении диагностических атрибутов.
+2. **Прямая модель воды и калибровка `evaporation_rate_ml_h`:**
+   - Удалены 14 мёртвых `history_stats` сенсоров `level_1..7_hours` и устаревшие JSON-таблицы `input_text.humidifier_*_consumption_rates`.
+   - Добавлены 2 реальных `history_stats` сенсора наработки (`sensor.humidifier_active_hours`, `sensor.humidifier_zap_active_hours` по `humidifier == 'on'`) и 2 персистентных `input_number` без `initial:` (`input_number.humidifier_evaporation_rate_ml_h`, `input_number.humidifier_zap_evaporation_rate_ml_h`).
+   - `humidifier_calibrate_rates` и `humidifier_zap_calibrate_rates` калибруют реальный расход `capacity / active_hours` (границы `300..620 мл/ч`, окно `2500..7500 мл`).
+3. **Очистка дашборда (`dashboards/humidity_dashboard.yaml`):**
+   - Серия графика `y3` и её ось переведены на `Mist Output` (`0–100%`, `range: [-5, 108]`).
+   - В `Zap Diagnostics` и `Eva Diagnostics` удалён мёртвый ползунок `Intensity: 0` (`number.*_intensity*`) и нечитаемый JSON ставок; оставлены согласованные `Control Demand` (`0%/100%`), `Mist Output` (`0%/100%`), `Evaporation Rate` и `Active Hours`.
+
+---
+
 ## v4.4.6 (2026-11-25)
 
 **Version:** 4.4.6

@@ -75,9 +75,9 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Intensity (y3) — step line
+          # 3. Mist Output (y3) — step line (0% / 100%)
           - entity: sensor.humidifier_zap_effective_intensity
-            name: Intensity
+            name: Mist Output
             yaxis: y3
             line:
               color: '#AB47BC'
@@ -180,12 +180,12 @@ views:
                 return [-padded, padded];
               }
 
-          # y3: Intensity (0-7) — hidden axis
+          # y3: Mist Output (0-100%) — hidden axis
           yaxis3:
             visible: false
             overlaying: "y"
             fixedrange: true
-            range: [-0.5, 8]
+            range: [-5, 108]
 
         defaults:
           xaxes:
@@ -303,14 +303,11 @@ views:
           - entity: sensor.humidity_zap_rate
             name: Rate
           - entity: sensor.humidity_zap_recommended_intensity
-            name: Recommended Intensity
+            name: Control Demand
             icon: mdi:gauge
           - entity: sensor.humidifier_zap_effective_intensity
-            name: Effective Intensity
-            icon: mdi:fan
-          - entity: number.humidifier_puh_9105_puh_2709_intensity_2
-            name: Intensity
-            icon: mdi:fan
+            name: Mist Output
+            icon: mdi:air-humidifier
           - entity: switch.humidifier_puh_9105_puh_2709_power_2
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier_2
@@ -339,9 +336,12 @@ views:
 
           - type: divider
 
-          - entity: input_text.humidifier_zap_consumption_rates
-            name: Calibrated Rates (ml/h)
-            icon: mdi:tune-vertical
+          - entity: input_number.humidifier_zap_evaporation_rate_ml_h
+            name: Evaporation Rate
+            icon: mdi:water-sync
+          - entity: sensor.humidifier_zap_active_hours
+            name: Active Hours
+            icon: mdi:timer-play-outline
           - entity: input_datetime.humidifier_zap_cycle_start
             name: Cycle Start
             icon: mdi:timer-outline
@@ -424,9 +424,9 @@ views:
             connectgaps: true
             showlegend: true
 
-          # 3. Intensity (y3) — step line
+          # 3. Mist Output (y3) — step line (0% / 100%)
           - entity: sensor.humidifier_effective_intensity
-            name: Intensity
+            name: Mist Output
             yaxis: y3
             line:
               color: '#AB47BC'
@@ -529,12 +529,12 @@ views:
                 return [-padded, padded];
               }
 
-          # y3: Intensity (0-7) — hidden axis
+          # y3: Mist Output (0-100%) — hidden axis
           yaxis3:
             visible: false
             overlaying: "y"
             fixedrange: true
-            range: [-0.5, 8]
+            range: [-5, 108]
 
         defaults:
           xaxes:
@@ -652,14 +652,11 @@ views:
           - entity: sensor.humidity_rate
             name: Rate
           - entity: sensor.recommended_intensity
-            name: Recommended Intensity
+            name: Control Demand
             icon: mdi:gauge
           - entity: sensor.humidifier_effective_intensity
-            name: Effective Intensity
-            icon: mdi:fan
-          - entity: number.humidifier_puh_9105_puh_2709_intensity
-            name: Intensity
-            icon: mdi:fan
+            name: Mist Output
+            icon: mdi:air-humidifier
           - entity: switch.humidifier_puh_9105_puh_2709_power
             name: Power
           - entity: humidifier.humidifier_puh_9105_puh_2709_humidifier
@@ -688,9 +685,12 @@ views:
 
           - type: divider
 
-          - entity: input_text.humidifier_consumption_rates
-            name: Calibrated Rates (ml/h)
-            icon: mdi:tune-vertical
+          - entity: input_number.humidifier_evaporation_rate_ml_h
+            name: Evaporation Rate
+            icon: mdi:water-sync
+          - entity: sensor.humidifier_active_hours
+            name: Active Hours
+            icon: mdi:timer-play-outline
           - entity: input_datetime.humidifier_cycle_start
             name: Cycle Start
             icon: mdi:timer-outline
