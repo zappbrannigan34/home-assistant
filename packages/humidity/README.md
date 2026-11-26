@@ -38,7 +38,7 @@
 - `script.humidity_enforce_area_mode` — удерживает ручной режим интенсивности (`mode: boost`, скорости `1..7`), `warm_stream: on`, `ioniser: on` и `child_lock/backlight/sound: off` на всех включённых устройствах комнаты (в `Standby` соблюдается 100% радиотишина).
 - `script.humidity_apply_area_control` — применяет целевую скорость (`0..7` от `recommended_intensity`) ко всем готовым увлажнителям комнаты независимо (ошибка или снятый бак на одном устройстве не останавливает остальные в той же `area`), соблюдая 0 MQTT-команд в `Standby`/ошибках, 3-секундный settle перед холодным стартом и пробуждение через `switch.turn_on(power)` перед `mode: boost`.
 - `automation.humidity_device_offline_watchdog` — отслеживает `binary_sensor.*_available*` и отправляет `p2_maintenance` через `script.notify_dispatch` при офлайне `>= 10 мин` (с автосбросом через `script.notify_clear`).
-- `automation.humidity_refill_detected` / `automation.humidity_zap_refill_detected` — обнаруживает заправку по снятию/установке бака (`water_tank`: `on → off`), по дневной автопроверке `09:00–22:00` (`periodic_probe`, на случай верхнего долива без снятия бака или молчания датчика `MCU 1.0.9` в `Standby`) или по кнопке Telegram `/refill_eva` / `/refill_zap`, с 50-секундной пробой `wait_for_trigger` (учитывает `43.1s` задержку поплавка `MCU 1.0.9`).
+- `automation.humidity_refill_detected` / `automation.humidity_zap_refill_detected` — запускает неразрушающую объёмную проверку заправки (`REFILL_PENDING >= 120 мл`, с `warm_stream: off`) по снятию/установке бака (`water_tank`: `on → off`, `>= 10 с`), нажатию физической кнопки `ON` на корпусе или кнопке Telegram `/refill_eva` / `/refill_zap` (без `periodic_probe`, с сохранением `water_consumed` при коротком осмотре бака `10–34 с`).
 
 ---
 
@@ -83,15 +83,17 @@
 
 - **Стейт-машина заправки (`needs_refill`)**: при ошибке `low_water`/`01` включается `input_boolean.humidifier_*_needs_refill`, питание выключается, а `Water Level` принудительно показывает **`0%`** (`remaining_ml: 0`, `hours_remaining: 0.0`).
 - **Надёжные уведомления (`script.notify_dispatch` / `script.notify_clear`) и порог 15%**: все уведомления об ошибках, предупреждении `<= 15%` (`humidity_water_low_warning`, 1 раз за цикл через `low_water_warned`), заправке и калибровке маршрутизируются через единый диспетчер `packages/notifications` (с учётом тихих часов, приоритетов `P1–P3`, fallback в `mobile_app` и автоочисткой при заправке).
-- **Полностью автоматическая фиксация заправки (`tank_replaced` + 15 с проба, без ручных кнопок)**: Polaris PUH‑9105 использует съёмный бак (без верхнего долива), поэтому достаточно достать бак, залить воду и поставить его на место (даже когда прибор выключен / в Standby):
-  1. **Детектор снятия и установки бака (`tank_replaced` в `humidity_*_refill_detected`)**: отслеживает переход `binary_sensor.*_water_tank` (`on → off`), отсеивая ложный ~55-секундный сброс в Standby фильтром `dur >= 10 and (not nr_on or since_empty > 2 or dur > 75)`. Далее автоматика запускает **тихую 15-секундную пробу** (`switch.turn_on` с приглушением `sound`/`backlight`, защищено от отключения через `probe_running` в `refill_probe_grace` внутри `humidity_apply_area_control`). Если за 15 с прибор работает и ошибка остаётся в норме (`00`/`no_error`/`02`/`child_lock`) при закрытом баке (`water_tank == 'off'`), неблокирующе запускается `script.humidifier_*_confirm_refill` (`100%`, `needs_refill → off`, уведомление, `humidity_control_main`); если бак пуст — питание сразу выключается;
-  2. **Резервный канал (`power_on_20s`)**: если `needs_refill == 'on'` и прибор проработал 20 с без `low_water`, также срабатывает `script.humidifier_*_confirm_refill`;
-  3. Скрипты `script.humidifier_eva_confirm_refill` / `script.humidifier_zap_confirm_refill` и тумблер `Needs Refill` (`humidity_manual_refill_toggle`) сохранены как сервисный резерв (ручные кнопки «Заправлен» убраны с дашборда).
-- **Поуровневая автокалибровка расхода (`1..7`, `level_1..7_hours`):** `history_stats` считает фактические часы работы на каждом уровне интенсивности от подтверждённого старта цикла (`cycle_start`). Автоматизации `humidifier_*_calibrate_rates` работают в `mode: restart`, проверяют нормальное предыдущее состояние (`trigger.from_state`) и то, что бак стоял закрытым на базе (`water_tank == 'off'` `>= 30 с` до `low_water` и `10 с` после `low_water`), без 3-минутной паузы, срывавшей запись при быстрой заправке. При полном цикле (`2500..9000 мл`) поуровневые ставки в `input_text.humidifier_*_consumption_rates` корректируются с EMA-весом `min(cycles, 10)` (границы `0.45..1.35` от номинала), а счётчик `input_number.humidifier_*_calibration_cycles` (`max: 10000`) увеличивается на `cycles + 1`.
+- **Полностью автоматическая фиксация заправки с защитой от конденсата (`REFILL_PENDING >= 120 мл`, без `periodic_probe`)**:
+  - После работы с `warm_stream: on` пар на стенках пустого 5-литрового бака конденсируется и вместе с остаточной водой из картриджа-фильтра (`15–50 мл`) стекает в поддон базы, чего хватает на `1–6 мин` работы на скорости `7` и до `40 мин` на скорости `1`. Поэтому слепой таймер `periodic_probe` полностью удалён, а подтверждение заправки привязано к **фактически испарённому объёму `>= 120 мл`**.
+  - При установке бака (`tank_replaced` по `water_tank: on → off`, `dur >= 10 с`, с отсечкой дребезга `tank_replaced_fails < 2` и сохранением текущего цикла при коротком осмотре непустого бака `10–34 с`), нажатии физической кнопки `ON` на корпусе, кнопке Telegram `/refill_*` или переключении тумблера UI включается стадия `refill_pending`: увлажнитель работает по PI+D с выключенным ТЭНом (`warm_stream: off`), **не затирая** прежние `water_consumed`/`cycle_start` и **не отправляя** `"✅ Бак заправлен"`. Если это был конденсат, прибор тихо выключается по `low_water` без ложных уведомлений.
+  - Как только испарено **`>= 120 мл`**, `humidity_refill_verified_commit` фиксирует `cycle_start = pending_cycle_start` задним числом, выставляет `water_consumed = ~120 мл`, включает `warm_stream: on`, очищает алерт и отправляет одно честное `"✅ Бак заправлен"`.
+- **Импульсный классификатор `low_water` и поуровневая автокалибровка (`1..7`, `effective_intensity`):**
+  - В `polaris-mqtt` `binary_sensor.*_water_tank` (`state/error/water`) срабатывает от того же поплавка базы: при реальном опустошении на базе авто-сбрасывается `on → off` за `5.15–6.07 с`, а при снятии бака руками держится `'on'` все `55–146 с`. Двухступенчатое ожидание `wait_for_trigger(2s + 10s)` точно отделяет сухой бак (`< 10 с`) от раннего снятия руками (`>= 10 с`, без ложной калибровки и без спама `"💧 Мало воды"`).
+  - Сенсоры `history_stats` `level_1..7_hours` считают часы по `sensor.humidifier_*_effective_intensity` (исключая паузы `Standby`). При полном цикле (`3600..7500 мл`, `total_hrs >= 3.0 ч`, согласованность `±20%`) ставки корректируются пропорционально доле объёма каждого уровня с обеспечением монотонности `r[1] <= ... <= r[7]` и инкрементом `cycles + 1` (`max: 10000`).
 
 ---
 
-## 🔧 Состав пакета (v4.6.1)
+## 🔧 Состав пакета (v4.7.0)
 
 ### Архитектурные гарантии и особенности `polaris-mqtt`
 
@@ -157,9 +159,10 @@
 | `humidity_device_setup` / `humidity_zap_device_setup` | Инициализация всех увлажнителей в `eva` / `zap` по `area` через `apply_area_control` |
 | `humidity_mode_enforcer` / `humidity_zap_mode_enforcer` | Сторож HA-only управления, `home`, `backlight/sound: off`, `child_lock: on`, `intensity` и питания → триггерит `control_main` |
 | `humidity_control_main` / `humidity_zap_control_main` | Очередное (`queued`) применение `recommended_intensity` ко всем устройствам `area` |
-| `humidifier_calibrate_rates` / `humidifier_zap_calibrate_rates` | Защищённая full-cycle автокалибровка расхода per-level при `low_water` (`10 с` проверка закрытого бака `water_tank == 'off'`, счётчик `cycles + 1`) |
-| `humidity_refill_detected` / `humidity_zap_refill_detected` | Полностью автоматическое обнаружение заправки по снятию/установке бака + тихая проба 50 с (и дневной `periodic_probe` / кнопка Telegram) |
-| `humidity_device_error` / `humidity_zap_device_error` | Обработка `low_water` и ошибок устройств + уведомление с fallback |
+| `humidifier_calibrate_rates` / `humidifier_zap_calibrate_rates` | Взвешенная поуровневая автокалибровка при реальном опустошении (`water_tank` авто-сброс `< 10 с`, монотонность `r[1]..r[7]`, `cycles + 1`) |
+| `humidity_refill_detected` / `humidity_zap_refill_detected` | Запуск объёмной проверки заправки (`REFILL_PENDING`) по `tank_replaced`, кнопке `ON` и `/refill_*` (без `periodic_probe`) |
+| `humidity_refill_verified_commit` | Фиксация полной заправки после фактического испарения `>= 120 мл` воды с учётом стартового расхода |
+| `humidity_device_error` / `humidity_zap_device_error` | Разделение реального `low_water` и снятия бака руками, тихий отбой конденсата и уведомления по сервисным кодам |
 
 ---
 
@@ -174,4 +177,4 @@
 
 **Devices:** Polaris PUH‑9105 / PUH‑2709 (`eva`, `zap`)  
 **Integration:** `polaris-mqtt` (MQTT)  
-**Version пакета:** 4.6.1
+**Version пакета:** 4.7.0

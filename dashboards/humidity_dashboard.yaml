@@ -338,8 +338,13 @@ views:
             suffix: h
           - entity: input_boolean.humidifier_zap_needs_refill
             name: Needs Refill
+          - type: attribute
+            entity: sensor.humidifier_zap_water_level
+            attribute: refill_pending
+            name: Refill Verifying (120 ml)
+            icon: mdi:water-check-outline
           - entity: binary_sensor.humidifier_puh_9105_puh_2709_water_tank_2
-            name: Water Tank Removed
+            name: Low Water Flag (MCU)
           - entity: sensor.humidifier_puh_9105_puh_2709_error_2
             name: Error Code
 
@@ -699,8 +704,13 @@ views:
             suffix: h
           - entity: input_boolean.humidifier_needs_refill
             name: Needs Refill
+          - type: attribute
+            entity: sensor.humidifier_water_level
+            attribute: refill_pending
+            name: Refill Verifying (120 ml)
+            icon: mdi:water-check-outline
           - entity: binary_sensor.humidifier_puh_9105_puh_2709_water_tank
-            name: Water Tank Removed
+            name: Low Water Flag (MCU)
           - entity: sensor.humidifier_puh_9105_puh_2709_error
             name: Error Code
 
