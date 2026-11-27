@@ -1,0 +1,1676 @@
+# package: ack_reminders_control
+# Version: 1.0.0
+# Purpose: Изолированный пакет гарантированных уведомлений с обратной связью
+#          (ACK / Snooze / ступенчатая эскалация 24/7) для 4 независимых слотов:
+#          tg (Telegram), meeting (совещание 10:00), pill (таблетки по плавающему сну), custom.
+#
+# Строгие ограничения:
+# - Все input_* объявлены БЕЗ initial:, все timer: с restore: true (переживают рестарт HA).
+# - Голосовые анонсы ТОЛЬКО на media_player.yandex_station_m105j4010yy1mk (Станция Мини zap).
+# - Пуши и clear_notification ТОЛЬКО на notify.mobile_app_zapphone (masy не затрагивается).
+# - Без деления на день/ночь (работают 24/7 одинаково).
+# - Имена helpers и template sensors — строго на английском; alias — английский, id — русский.
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  INPUT HELPERS (строго без initial:)
+# ──────────────────────────────────────────────────────────────────────────────
+
+input_boolean:
+  ack_defaults_initialized:
+    name: "Ack Defaults Initialized"
+    icon: mdi:cog-check
+
+  ack_enabled:
+    name: "Ack Reminders Enabled"
+    icon: mdi:bell-ring
+
+  # Независимые флаги активности 4 слотов
+  ack_tg_active:
+    name: "Ack Tg Active"
+    icon: mdi:send-circle
+
+  ack_meeting_active:
+    name: "Ack Meeting Active"
+    icon: mdi:calendar-clock
+
+  ack_pill_active:
+    name: "Ack Pill Active"
+    icon: mdi:pill
+
+  ack_custom_active:
+    name: "Ack Custom Active"
+    icon: mdi:bell-alert
+
+  # Состояние приёма 1-й и 2-й таблетки в текущем цикле бодрствования
+  ack_pill_dose1_taken:
+    name: "Ack Pill Dose1 Taken"
+    icon: mdi:pill-multiple
+
+  ack_pill_dose2_taken:
+    name: "Ack Pill Dose2 Taken"
+    icon: mdi:check-decagram
+
+  # Виртуальные переключатели для голосовой обратной связи через Yaha Cloud / Алису
+  ack_voice_confirm:
+    name: "Ack Voice Confirm"
+    icon: mdi:microphone-message
+
+  ack_voice_pill_taken:
+    name: "Ack Voice Pill Taken"
+    icon: mdi:pill
+
+  ack_voice_snooze:
+    name: "Ack Voice Snooze"
+    icon: mdi:alarm-snooze
+
+input_number:
+  ack_speaker_volume:
+    name: "Ack Speaker Volume"
+    min: 0.1
+    max: 1.0
+    step: 0.05
+    mode: slider
+    icon: mdi:volume-high
+
+  ack_pill_interval_hours:
+    name: "Ack Pill Interval Hours"
+    min: 4
+    max: 24
+    step: 0.5
+    unit_of_measurement: "h"
+    mode: box
+    icon: mdi:clock-time-eight
+
+  ack_sleep_gap_hours:
+    name: "Ack Sleep Gap Hours"
+    min: 2
+    max: 10
+    step: 0.5
+    unit_of_measurement: "h"
+    mode: box
+    icon: mdi:weather-night
+
+input_text:
+  ack_meeting_url:
+    name: "Ack Meeting Url"
+    max: 255
+    icon: mdi:link-variant
+
+  # Telegram Active-Standby heartbeat и дедупликация / авто-отбой
+  ack_tg_primary_heartbeat:
+    name: "Ack Tg Primary Heartbeat"
+    max: 255
+    icon: mdi:heart-pulse
+
+  ack_tg_last_event_id:
+    name: "Ack Tg Last Event Id"
+    max: 128
+    icon: mdi:identifier
+
+  ack_tg_active_chat_id:
+    name: "Ack Tg Active Chat Id"
+    max: 64
+    icon: mdi:forum
+
+  # Стадия цикла таблеток: idle | wakeup_wait | dose1_due | dose2_wait | dose2_due | done
+  ack_pill_stage:
+    name: "Ack Pill Stage"
+    max: 32
+    icon: mdi:pill
+
+  # Слот tg
+  ack_tg_title:
+    name: "Ack Tg Title"
+    max: 255
+  ack_tg_message:
+    name: "Ack Tg Message"
+    max: 255
+  ack_tg_tts:
+    name: "Ack Tg Tts"
+    max: 255
+  ack_tg_url:
+    name: "Ack Tg Url"
+    max: 255
+  ack_tg_tg_msg_id:
+    name: "Ack Tg Tg Msg Id"
+    max: 64
+
+  # Слот meeting
+  ack_meeting_title:
+    name: "Ack Meeting Title"
+    max: 255
+  ack_meeting_message:
+    name: "Ack Meeting Message"
+    max: 255
+  ack_meeting_tts:
+    name: "Ack Meeting Tts"
+    max: 255
+  ack_meeting_url_active:
+    name: "Ack Meeting Url Active"
+    max: 255
+  ack_meeting_tg_msg_id:
+    name: "Ack Meeting Tg Msg Id"
+    max: 64
+
+  # Слот pill
+  ack_pill_title:
+    name: "Ack Pill Title"
+    max: 255
+  ack_pill_message:
+    name: "Ack Pill Message"
+    max: 255
+  ack_pill_tts:
+    name: "Ack Pill Tts"
+    max: 255
+  ack_pill_url:
+    name: "Ack Pill Url"
+    max: 255
+  ack_pill_tg_msg_id:
+    name: "Ack Pill Tg Msg Id"
+    max: 64
+
+  # Слот custom
+  ack_custom_title:
+    name: "Ack Custom Title"
+    max: 255
+  ack_custom_message:
+    name: "Ack Custom Message"
+    max: 255
+  ack_custom_tts:
+    name: "Ack Custom Tts"
+    max: 255
+  ack_custom_url:
+    name: "Ack Custom Url"
+    max: 255
+  ack_custom_tg_msg_id:
+    name: "Ack Custom Tg Msg Id"
+    max: 64
+
+input_datetime:
+  ack_last_activity_ts:
+    name: "Ack Last Activity Ts"
+    has_date: true
+    has_time: true
+    icon: mdi:motion-sensor
+
+  ack_pill_cycle_start_ts:
+    name: "Ack Pill Cycle Start Ts"
+    has_date: true
+    has_time: true
+    icon: mdi:weather-sunset-up
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  TIMERS (строго с restore: true)
+# ──────────────────────────────────────────────────────────────────────────────
+
+timer:
+  ack_tg_snooze:
+    name: "Ack Tg Snooze"
+    duration: "00:10:00"
+    restore: true
+    icon: mdi:alarm-snooze
+
+  ack_meeting_snooze:
+    name: "Ack Meeting Snooze"
+    duration: "00:04:00"
+    restore: true
+    icon: mdi:alarm-snooze
+
+  ack_pill_snooze:
+    name: "Ack Pill Snooze"
+    duration: "00:15:00"
+    restore: true
+    icon: mdi:alarm-snooze
+
+  ack_custom_snooze:
+    name: "Ack Custom Snooze"
+    duration: "00:10:00"
+    restore: true
+    icon: mdi:alarm-snooze
+
+  ack_pill_wakeup_delay:
+    name: "Ack Pill Wakeup Delay"
+    duration: "00:15:00"
+    restore: true
+    icon: mdi:timer-sand
+
+  ack_pill_dose2_gap:
+    name: "Ack Pill Dose2 Gap"
+    duration: "13:00:00"
+    restore: true
+    icon: mdi:timer-outline
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MQTT SENSORS (статус моста на ZAPPC)
+# ──────────────────────────────────────────────────────────────────────────────
+
+mqtt:
+  sensor:
+    - name: "Ack Zappc Bridge Status"
+      unique_id: ack_zappc_bridge_status
+      state_topic: "homeassistant/ack_reminders/zappc_bridge_status"
+      value_template: "{{ value_json.status | default('unknown') }}"
+      json_attributes_topic: "homeassistant/ack_reminders/zappc_bridge_status"
+      icon: mdi:bridge
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  TRIGGER-BASED TEMPLATE SENSORS (английские name, обязательные unique_id)
+# ──────────────────────────────────────────────────────────────────────────────
+
+template:
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: state
+        entity_id:
+          - input_boolean.ack_enabled
+          - input_boolean.ack_tg_active
+          - input_boolean.ack_meeting_active
+          - input_boolean.ack_pill_active
+          - input_boolean.ack_custom_active
+          - timer.ack_tg_snooze
+          - timer.ack_meeting_snooze
+          - timer.ack_pill_snooze
+          - timer.ack_custom_snooze
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Ack Active Reminders Summary"
+        unique_id: ack_active_reminders_summary
+        icon: mdi:bell-badge
+        state: >
+          {% if not is_state('input_boolean.ack_enabled', 'on') %}
+            Система на паузе
+          {% else %}
+            {% set ns = namespace(items=[]) %}
+            {% if is_state('input_boolean.ack_tg_active', 'on') %}
+              {% set ns.items = ns.items + ['Телеграм' ~ (' (отложено)' if is_state('timer.ack_tg_snooze', 'active') else '')] %}
+            {% endif %}
+            {% if is_state('input_boolean.ack_meeting_active', 'on') %}
+              {% set ns.items = ns.items + ['Совещание' ~ (' (отложено)' if is_state('timer.ack_meeting_snooze', 'active') else '')] %}
+            {% endif %}
+            {% if is_state('input_boolean.ack_pill_active', 'on') %}
+              {% set ns.items = ns.items + ['Таблетка' ~ (' (отложено)' if is_state('timer.ack_pill_snooze', 'active') else '')] %}
+            {% endif %}
+            {% if is_state('input_boolean.ack_custom_active', 'on') %}
+              {% set ns.items = ns.items + ['Напоминание' ~ (' (отложено)' if is_state('timer.ack_custom_snooze', 'active') else '')] %}
+            {% endif %}
+            {{ ('Активно: ' ~ (ns.items | join(', '))) if (ns.items | length) > 0 else 'Нет активных напоминаний' }}
+          {% endif %}
+        attributes:
+          active_count: >
+            {{ [
+              is_state('input_boolean.ack_tg_active', 'on'),
+              is_state('input_boolean.ack_meeting_active', 'on'),
+              is_state('input_boolean.ack_pill_active', 'on'),
+              is_state('input_boolean.ack_custom_active', 'on')
+            ] | select('equalto', true) | list | length }}
+          active_slots: >
+            {% set ns = namespace(s=[]) %}
+            {% for slot in ['tg', 'meeting', 'pill', 'custom'] %}
+              {% if is_state('input_boolean.ack_' ~ slot ~ '_active', 'on') %}
+                {% set ns.s = ns.s + [slot] %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.s }}
+
+  - trigger:
+      - platform: time_pattern
+        minutes: "/1"
+      - platform: state
+        entity_id:
+          - input_boolean.ack_pill_dose1_taken
+          - input_boolean.ack_pill_dose2_taken
+          - input_boolean.ack_pill_active
+          - input_text.ack_pill_stage
+          - timer.ack_pill_wakeup_delay
+          - timer.ack_pill_dose2_gap
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Ack Pill Status Summary"
+        unique_id: ack_pill_status_summary
+        icon: mdi:pill
+        state: >
+          {% set d1 = is_state('input_boolean.ack_pill_dose1_taken', 'on') %}
+          {% set d2 = is_state('input_boolean.ack_pill_dose2_taken', 'on') %}
+          {% if d1 and d2 %}
+            Обе таблетки приняты
+          {% elif is_state('input_boolean.ack_pill_active', 'on') %}
+            {{ 'Ждёт подтверждения 2-й таблетки' if d1 else 'Ждёт подтверждения 1-й таблетки' }}
+          {% elif is_state('timer.ack_pill_wakeup_delay', 'active') %}
+            Пробуждение замечено, сигнал через 15 мин
+          {% elif is_state('timer.ack_pill_dose2_gap', 'active') %}
+            1-я принята, идёт отсчёт до 2-й
+          {% elif d1 and not d2 %}
+            1-я принята, ожидание 2-й
+          {% else %}
+            Ожидание пробуждения
+          {% endif %}
+        attributes:
+          dose1_taken: "{{ is_state('input_boolean.ack_pill_dose1_taken', 'on') }}"
+          dose2_taken: "{{ is_state('input_boolean.ack_pill_dose2_taken', 'on') }}"
+          stage: "{{ states('input_text.ack_pill_stage') }}"
+          wakeup_timer: "{{ states('timer.ack_pill_wakeup_delay') }}"
+          dose2_timer: "{{ states('timer.ack_pill_dose2_gap') }}"
+
+  - trigger:
+      - platform: time_pattern
+        seconds: "/30"
+      - platform: state
+        entity_id:
+          - input_text.ack_tg_primary_heartbeat
+          - sensor.ack_zappc_bridge_status
+      - platform: homeassistant
+        event: start
+    sensor:
+      - name: "Ack Telegram Listener Status"
+        unique_id: ack_telegram_listener_status
+        icon: mdi:radio-tower
+        state: >
+          {% set raw = states('input_text.ack_tg_primary_heartbeat') | default('', true) %}
+          {% set parts = raw.split('|') %}
+          {% set ts = (parts[0] | float(0)) if (parts | length) >= 1 else 0 %}
+          {% set host = parts[1] if (parts | length) >= 2 else '' %}
+          {% set pstate = parts[2] if (parts | length) >= 3 else '' %}
+          {% set age = (now().timestamp() - ts) | int if ts > 0 else 999999 %}
+          {% set bridge_tg = state_attr('sensor.ack_zappc_bridge_status', 'tg_mode') | default('', true) %}
+          {% if age < 90 and pstate in ['connected', 'reclaiming'] %}
+            {{ 'Основной канал активен (ноутбук)' if (host | lower) == 'zapnotebook' else 'Основной канал активен' }}
+          {% elif bridge_tg == 'active' %}
+            Резервный канал активен (домашний ПК)
+          {% elif states('sensor.ack_zappc_bridge_status') in ['online', 'standby', 'active'] %}
+            Резервный канал в ожидании
+          {% else %}
+            Нет связи со слушателем
+          {% endif %}
+        attributes:
+          primary_host: >
+            {% set parts = (states('input_text.ack_tg_primary_heartbeat') | default('', true)).split('|') %}
+            {{ parts[1] if (parts | length) >= 2 else 'неизвестно' }}
+          primary_state: >
+            {% set parts = (states('input_text.ack_tg_primary_heartbeat') | default('', true)).split('|') %}
+            {{ parts[2] if (parts | length) >= 3 else 'нет данных' }}
+          primary_age_sec: >
+            {% set parts = (states('input_text.ack_tg_primary_heartbeat') | default('', true)).split('|') %}
+            {% set ts = (parts[0] | float(0)) if (parts | length) >= 1 else 0 %}
+            {{ (now().timestamp() - ts) | int if ts > 0 else -1 }}
+          zappc_bridge_state: "{{ states('sensor.ack_zappc_bridge_status') }}"
+          zappc_tg_mode: "{{ state_attr('sensor.ack_zappc_bridge_status', 'tg_mode') | default('неизвестно', true) }}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SCRIPTS (английские alias: ack_...)
+# ──────────────────────────────────────────────────────────────────────────────
+
+script:
+  # Вспомогательный скрипт: мягкая Ступень 1 (Telegram + обычный пуш на zapphone)
+  ack_send_soft_alert:
+    alias: "ack_send_soft_alert"
+    mode: parallel
+    max: 10
+    fields:
+      slot:
+        required: true
+    sequence:
+      - variables:
+          slot_id: "{{ slot | lower }}"
+          title_txt: "{{ states('input_text.ack_' ~ slot_id ~ '_title') | default('Напоминание', true) }}"
+          msg_txt: "{{ states('input_text.ack_' ~ slot_id ~ '_message') | default('Требуется подтверждение', true) }}"
+          url_entity: "{{ 'input_text.ack_meeting_url_active' if slot_id == 'meeting' else 'input_text.ack_' ~ slot_id ~ '_url' }}"
+          url_txt: "{{ states(url_entity) | default('', true) | trim }}"
+          tg_entity: "notify.telegram_bot_8110302509_1002715853345"
+          tag_id: "ack_{{ slot_id }}"
+          act_ack: "ACK_{{ slot_id | upper }}"
+          act_snooze: "SNOOZE_{{ slot_id | upper }}"
+      # 1. Telegram сообщение с inline-кнопками и message_tag
+      - action: telegram_bot.send_message
+        continue_on_error: true
+        response_variable: tg_resp
+        data:
+          entity_id: "{{ tg_entity }}"
+          title: "{{ title_txt }}"
+          message: >-
+            {{ msg_txt }}{% if url_txt != '' %}
+
+            Ссылка: {{ url_txt }}{% endif %}
+          parse_mode: plain_text
+          disable_notification: false
+          message_tag: "{{ tag_id }}"
+          inline_keyboard:
+            - "✅ Принял:/ack_{{ slot_id }}, ⏸ Отложить:/snooze_{{ slot_id }}"
+      # Сохраняем message_id сразу из response_variable (если вернулся)
+      - if:
+          - condition: template
+            value_template: "{{ tg_resp is defined and tg_resp.chats is defined and (tg_resp.chats | length) > 0 and tg_resp.chats[0].message_id is defined }}"
+        then:
+          - action: input_text.set_value
+            target:
+              entity_id: "input_text.ack_{{ slot_id }}_tg_msg_id"
+            data:
+              value: "{{ tg_resp.chats[0].message_id | string }}"
+      # 2. Обычный пуш на zapphone с кнопками и clickAction
+      - if:
+          - condition: template
+            value_template: "{{ url_txt != '' }}"
+        then:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title_txt }}"
+              message: "{{ msg_txt }}"
+              data:
+                tag: "{{ tag_id }}"
+                sticky: true
+                clickAction: "{{ url_txt }}"
+                url: "{{ url_txt }}"
+                actions:
+                  - action: "{{ act_ack }}"
+                    title: "✅ Принял"
+                  - action: "{{ act_snooze }}"
+                    title: "⏸ Отложить"
+        else:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title_txt }}"
+              message: "{{ msg_txt }}"
+              data:
+                tag: "{{ tag_id }}"
+                sticky: true
+                actions:
+                  - action: "{{ act_ack }}"
+                    title: "✅ Принял"
+                  - action: "{{ act_snooze }}"
+                    title: "⏸ Отложить"
+
+  # Вспомогательный скрипт: громкая Ступень 2/3 (пробой DND на zapphone + TTS на zapphone + Станция Мини zap + свет ванной)
+  ack_send_loud_alert:
+    alias: "ack_send_loud_alert"
+    mode: parallel
+    max: 10
+    fields:
+      slot:
+        required: true
+    sequence:
+      - variables:
+          slot_id: "{{ slot | lower }}"
+          title_txt: "{{ states('input_text.ack_' ~ slot_id ~ '_title') | default('Напоминание', true) }}"
+          msg_txt: "{{ states('input_text.ack_' ~ slot_id ~ '_message') | default('Требуется подтверждение', true) }}"
+          tts_txt: "{{ states('input_text.ack_' ~ slot_id ~ '_tts') | default(title_txt, true) }}"
+          url_entity: "{{ 'input_text.ack_meeting_url_active' if slot_id == 'meeting' else 'input_text.ack_' ~ slot_id ~ '_url' }}"
+          url_txt: "{{ states(url_entity) | default('', true) | trim }}"
+          tag_id: "ack_{{ slot_id }}"
+          act_ack: "ACK_{{ slot_id | upper }}"
+          act_snooze: "SNOOZE_{{ slot_id | upper }}"
+          spk_vol: "{{ states('input_number.ack_speaker_volume') | float(0.65) }}"
+          bath_motion: >-
+            {{ is_state('binary_sensor.motion_bathroom1_occupancy', 'on')
+               or is_state('binary_sensor.motion_bathroom2_occupancy', 'on') }}
+      # 1a. Озвучка TTS на телефоне zapphone в потоке alarm_stream_max (пробой DND)
+      - action: notify.mobile_app_zapphone
+        continue_on_error: true
+        data:
+          message: "TTS"
+          data:
+            ttl: 0
+            priority: high
+            media_stream: alarm_stream_max
+            tts_text: "{{ tts_txt }}"
+      # 1b. Следом визуальный persistent пуш с кнопками на экране блокировки (пробой DND)
+      - if:
+          - condition: template
+            value_template: "{{ url_txt != '' }}"
+        then:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title_txt }}"
+              message: "{{ msg_txt }}"
+              data:
+                ttl: 0
+                priority: high
+                channel: alarm_stream_max
+                importance: high
+                persistent: true
+                sticky: true
+                tag: "{{ tag_id }}"
+                clickAction: "{{ url_txt }}"
+                url: "{{ url_txt }}"
+                actions:
+                  - action: "{{ act_ack }}"
+                    title: "✅ Принял"
+                  - action: "{{ act_snooze }}"
+                    title: "⏸ Отложить"
+        else:
+          - action: notify.mobile_app_zapphone
+            continue_on_error: true
+            data:
+              title: "{{ title_txt }}"
+              message: "{{ msg_txt }}"
+              data:
+                ttl: 0
+                priority: high
+                channel: alarm_stream_max
+                importance: high
+                persistent: true
+                sticky: true
+                tag: "{{ tag_id }}"
+                actions:
+                  - action: "{{ act_ack }}"
+                    title: "✅ Принял"
+                  - action: "{{ act_snooze }}"
+                    title: "⏸ Отложить"
+      # 2. Голос СТРОГО ТОЛЬКО на Станция Мини zap (с автовозвратом громкости через extra.volume_level)
+      - if:
+          - condition: template
+            value_template: >-
+              {{ states('media_player.yandex_station_m105j4010yy1mk') not in ['unavailable', 'unknown', 'none', '']
+                 and tts_txt | trim != '' }}
+        then:
+          - action: media_player.play_media
+            continue_on_error: true
+            target:
+              entity_id: media_player.yandex_station_m105j4010yy1mk
+            data:
+              media_content_id: "{{ tts_txt }}"
+              media_content_type: text
+              extra:
+                volume_level: "{{ spk_vol }}"
+      # 3. Если активно движение в ванной — мягко мигнуть 2 раза и гарантированно вернуть исходное состояние
+      - if:
+          - condition: template
+            value_template: "{{ bath_motion and states('light.light_bathroom') in ['on', 'off'] }}"
+        then:
+          - variables:
+              bath_orig: "{{ states('light.light_bathroom') }}"
+          - action: light.toggle
+            continue_on_error: true
+            target:
+              entity_id: light.light_bathroom
+          - delay:
+              seconds: 1
+          - action: light.toggle
+            continue_on_error: true
+            target:
+              entity_id: light.light_bathroom
+          - delay:
+              seconds: 1
+          - action: light.toggle
+            continue_on_error: true
+            target:
+              entity_id: light.light_bathroom
+          - delay:
+              seconds: 1
+          - if:
+              - condition: template
+                value_template: "{{ bath_orig == 'on' }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: light.light_bathroom
+            else:
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: light.light_bathroom
+
+  # Общая логика 3-ступенчатой лестницы эскалации (вызывается из пер-слотовых restart-скриптов)
+  ack_run_escalation_loop:
+    alias: "ack_run_escalation_loop"
+    mode: parallel
+    max: 8
+    fields:
+      slot:
+        required: true
+    sequence:
+      - variables:
+          slot_id: "{{ slot | lower }}"
+          active_ent: "input_boolean.ack_{{ slot_id }}_active"
+          snooze_ent: "timer.ack_{{ slot_id }}_snooze"
+      # Ступень 1 (0 с)
+      - action: script.ack_send_soft_alert
+        data:
+          slot: "{{ slot_id }}"
+      # Пауза 45 с перед Ступенью 2
+      - delay:
+          seconds: 45
+      - condition: template
+        value_template: >-
+          {{ is_state('input_boolean.ack_enabled', 'on')
+             and is_state(active_ent, 'on')
+             and is_state(snooze_ent, 'idle') }}
+      # Ступень 2 (45 с)
+      - action: script.ack_send_loud_alert
+        data:
+          slot: "{{ slot_id }}"
+      # Ступень 3: интервалы [2, 2, 3, 5, 5, 5, 10, 10, 15, 15, 15, 15] минут
+      - repeat:
+          for_each: [2, 2, 3, 5, 5, 5, 10, 10, 15, 15, 15, 15]
+          sequence:
+            - delay:
+                minutes: "{{ repeat.item }}"
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ not (is_state('input_boolean.ack_enabled', 'on')
+                            and is_state(active_ent, 'on')
+                            and is_state(snooze_ent, 'idle')) }}
+              then:
+                - stop: "Напоминание подтверждено или отложено"
+            - action: script.ack_send_loud_alert
+              data:
+                slot: "{{ slot_id }}"
+
+  # Независимые restart-исполнители по каждому слоту (позволяют мгновенно перезапускать или останавливать один слот без влияния на остальные)
+  ack_escalate_tg:
+    alias: "ack_escalate_tg"
+    mode: restart
+    sequence:
+      - action: script.ack_run_escalation_loop
+        data:
+          slot: "tg"
+
+  ack_escalate_meeting:
+    alias: "ack_escalate_meeting"
+    mode: restart
+    sequence:
+      - action: script.ack_run_escalation_loop
+        data:
+          slot: "meeting"
+
+  ack_escalate_pill:
+    alias: "ack_escalate_pill"
+    mode: restart
+    sequence:
+      - action: script.ack_run_escalation_loop
+        data:
+          slot: "pill"
+
+  ack_escalate_custom:
+    alias: "ack_escalate_custom"
+    mode: restart
+    sequence:
+      - action: script.ack_run_escalation_loop
+        data:
+          slot: "custom"
+
+  # Главная точка запуска напоминания для слота
+  ack_reminder_start:
+    alias: "ack_reminder_start"
+    mode: queued
+    max: 10
+    fields:
+      slot:
+        description: "Слот напоминания: tg | meeting | pill | custom"
+        required: true
+      title:
+        description: "Заголовок"
+        required: true
+      message:
+        description: "Текст уведомления"
+        required: true
+      tts_text:
+        description: "Текст для озвучивания голосом"
+        default: ""
+      url:
+        description: "Ссылка при клике на пуш"
+        default: ""
+      snooze_minutes:
+        description: "Минуты отсрочки (опционально)"
+        default: 0
+    sequence:
+      - condition: state
+        entity_id: input_boolean.ack_enabled
+        state: "on"
+      - variables:
+          slot_id: >-
+            {% set s = (slot | default('custom', true) | lower | trim) %}
+            {{ s if s in ['tg', 'meeting', 'pill', 'custom'] else 'custom' }}
+          title_safe: "{{ (title | default('Напоминание', true) | string | trim)[:250] }}"
+          msg_safe: "{{ (message | default('Требуется подтверждение', true) | string | trim)[:250] }}"
+          tts_safe: "{{ (tts_text | default(title_safe, true) | string | trim)[:250] }}"
+          url_safe: "{{ (url | default('', true) | string | trim)[:250] }}"
+          url_entity: "{{ 'input_text.ack_meeting_url_active' if slot_id == 'meeting' else 'input_text.ack_' ~ slot_id ~ '_url' }}"
+      - action: timer.cancel
+        continue_on_error: true
+        target:
+          entity_id: "timer.ack_{{ slot_id }}_snooze"
+      - action: input_text.set_value
+        target:
+          entity_id: "input_text.ack_{{ slot_id }}_title"
+        data:
+          value: "{{ title_safe }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "input_text.ack_{{ slot_id }}_message"
+        data:
+          value: "{{ msg_safe }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "input_text.ack_{{ slot_id }}_tts"
+        data:
+          value: "{{ tts_safe }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ url_entity }}"
+        data:
+          value: "{{ url_safe }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: "input_boolean.ack_{{ slot_id }}_active"
+      # Неблокирующий запуск пер-слотового restart-цикла эскалации
+      - action: script.turn_on
+        target:
+          entity_id: "script.ack_escalate_{{ slot_id }}"
+
+  # Подтверждение (ACK) одного конкретного слота
+  ack_reminder_confirm_single:
+    alias: "ack_reminder_confirm_single"
+    mode: queued
+    max: 10
+    fields:
+      slot:
+        required: true
+      source_label:
+        default: "Подтверждено пользователем"
+    sequence:
+      - variables:
+          slot_id: "{{ slot | lower }}"
+          src_lbl: "{{ source_label | default('Подтверждено пользователем', true) }}"
+          old_title: "{{ states('input_text.ack_' ~ slot_id ~ '_title') | default('Напоминание', true) }}"
+          tg_msg_id: "{{ states('input_text.ack_' ~ slot_id ~ '_tg_msg_id') | default('', true) | trim }}"
+          tg_entity: "notify.telegram_bot_8110302509_1002715853345"
+          tag_id: "ack_{{ slot_id }}"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: "input_boolean.ack_{{ slot_id }}_active"
+      - action: timer.cancel
+        continue_on_error: true
+        target:
+          entity_id: "timer.ack_{{ slot_id }}_snooze"
+      - action: script.turn_off
+        continue_on_error: true
+        target:
+          entity_id: "script.ack_escalate_{{ slot_id }}"
+      # Очистка пуша строго на zapphone (masy не трогаем!)
+      - action: notify.mobile_app_zapphone
+        continue_on_error: true
+        data:
+          message: "clear_notification"
+          data:
+            tag: "{{ tag_id }}"
+      # Редактируем сообщение в Telegram и снимаем кнопки
+      - if:
+          - condition: template
+            value_template: "{{ tg_msg_id not in ['', 'unknown', 'unavailable', 'none'] }}"
+        then:
+          - action: telegram_bot.edit_message
+            continue_on_error: true
+            data:
+              entity_id: "{{ tg_entity }}"
+              message_id: "{{ tg_msg_id }}"
+              title: "✅ Подтверждено"
+              message: "{{ old_title }}\n✅ Подтверждено ({{ src_lbl }}) в {{ now().strftime('%H:%M') }}"
+              parse_mode: plain_text
+              inline_keyboard: []
+          - action: input_text.set_value
+            target:
+              entity_id: "input_text.ack_{{ slot_id }}_tg_msg_id"
+            data:
+              value: ""
+      # Спецлогика слота pill: доза 1 -> запуск таймера 13ч до дозы 2; доза 2 -> завершение цикла
+      - if:
+          - condition: template
+            value_template: "{{ slot_id == 'pill' }}"
+        then:
+          - action: timer.cancel
+            continue_on_error: true
+            target:
+              entity_id: timer.ack_pill_wakeup_delay
+          - if:
+              - condition: state
+                entity_id: input_boolean.ack_pill_dose1_taken
+                state: "off"
+            then:
+              - variables:
+                  gap_sec: "{{ (states('input_number.ack_pill_interval_hours') | float(13) * 3600) | int }}"
+                  gap_hms: "{{ '%02d:%02d:%02d' | format(gap_sec // 3600, (gap_sec % 3600) // 60, gap_sec % 60) }}"
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.ack_pill_dose1_taken
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ack_pill_stage
+                data:
+                  value: "dose2_wait"
+              - action: timer.start
+                target:
+                  entity_id: timer.ack_pill_dose2_gap
+                data:
+                  duration: "{{ gap_hms }}"
+            else:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: input_boolean.ack_pill_dose2_taken
+              - action: timer.cancel
+                continue_on_error: true
+                target:
+                  entity_id: timer.ack_pill_dose2_gap
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ack_pill_stage
+                data:
+                  value: "done"
+
+  # Главная точка подтверждения (ACK): поддерживает конкретный слот или slot='all'
+  ack_reminder_confirm:
+    alias: "ack_reminder_confirm"
+    mode: queued
+    max: 10
+    fields:
+      slot:
+        description: "tg | meeting | pill | custom | all"
+        default: "all"
+      source_label:
+        description: "Источник подтверждения"
+        default: "Подтверждено"
+    sequence:
+      - variables:
+          req_slot: "{{ slot | default('all', true) | lower | trim }}"
+          src_lbl: "{{ source_label | default('Подтверждено', true) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ req_slot in ['tg', 'meeting', 'pill', 'custom'] }}"
+            sequence:
+              - action: script.ack_reminder_confirm_single
+                data:
+                  slot: "{{ req_slot }}"
+                  source_label: "{{ src_lbl }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ req_slot == 'all' }}"
+            sequence:
+              - variables:
+                  non_pill_active: >-
+                    {{ is_state('input_boolean.ack_tg_active', 'on')
+                       or is_state('input_boolean.ack_meeting_active', 'on')
+                       or is_state('input_boolean.ack_custom_active', 'on') }}
+              - if:
+                  - condition: template
+                    value_template: "{{ non_pill_active }}"
+                then:
+                  - repeat:
+                      for_each: ["tg", "meeting", "custom"]
+                      sequence:
+                        - if:
+                            - condition: template
+                              value_template: "{{ is_state('input_boolean.ack_' ~ repeat.item ~ '_active', 'on') }}"
+                          then:
+                            - action: script.ack_reminder_confirm_single
+                              data:
+                                slot: "{{ repeat.item }}"
+                                source_label: "{{ src_lbl }}"
+                else:
+                  - if:
+                      - condition: state
+                        entity_id: input_boolean.ack_pill_active
+                        state: "on"
+                    then:
+                      - action: script.ack_reminder_confirm_single
+                        data:
+                          slot: "pill"
+                          source_label: "{{ src_lbl }}"
+
+  # Отсрочка (SNOOZE) одного конкретного слота (не сбрасывает active!)
+  ack_reminder_snooze_single:
+    alias: "ack_reminder_snooze_single"
+    mode: queued
+    max: 10
+    fields:
+      slot:
+        required: true
+      minutes:
+        default: 0
+    sequence:
+      - variables:
+          slot_id: "{{ slot | lower }}"
+          def_mins: >-
+            {% if slot_id == 'meeting' %}4
+            {% elif slot_id == 'pill' %}15
+            {% else %}10{% endif %}
+          snooze_m: "{{ (minutes | int(0)) if (minutes | int(0)) > 0 else (def_mins | int) }}"
+          snooze_hms: "{{ '%02d:%02d:00' | format(snooze_m // 60, snooze_m % 60) }}"
+          resume_hm: "{{ (now() + timedelta(minutes=snooze_m)).strftime('%H:%M') }}"
+          old_title: "{{ states('input_text.ack_' ~ slot_id ~ '_title') | default('Напоминание', true) }}"
+          tg_msg_id: "{{ states('input_text.ack_' ~ slot_id ~ '_tg_msg_id') | default('', true) | trim }}"
+          tg_entity: "notify.telegram_bot_8110302509_1002715853345"
+          tag_id: "ack_{{ slot_id }}"
+      - condition: template
+        value_template: "{{ is_state('input_boolean.ack_' ~ slot_id ~ '_active', 'on') }}"
+      - action: script.turn_off
+        continue_on_error: true
+        target:
+          entity_id: "script.ack_escalate_{{ slot_id }}"
+      - action: timer.start
+        target:
+          entity_id: "timer.ack_{{ slot_id }}_snooze"
+        data:
+          duration: "{{ snooze_hms }}"
+      # Снимаем звонящий пуш с zapphone на время паузы
+      - action: notify.mobile_app_zapphone
+        continue_on_error: true
+        data:
+          message: "clear_notification"
+          data:
+            tag: "{{ tag_id }}"
+      # Обновляем сообщение в Telegram, оставляя кнопку «Принял»
+      - if:
+          - condition: template
+            value_template: "{{ tg_msg_id not in ['', 'unknown', 'unavailable', 'none'] }}"
+        then:
+          - action: telegram_bot.edit_message
+            continue_on_error: true
+            data:
+              entity_id: "{{ tg_entity }}"
+              message_id: "{{ tg_msg_id }}"
+              title: "⏸ Отложено"
+              message: "{{ old_title }}\n⏸ Отложено на {{ snooze_m }} мин (до {{ resume_hm }})"
+              parse_mode: plain_text
+              inline_keyboard:
+                - "✅ Принял:/ack_{{ slot_id }}"
+
+  # Главная точка отсрочки (SNOOZE): поддерживает конкретный слот или slot='all'
+  ack_reminder_snooze:
+    alias: "ack_reminder_snooze"
+    mode: queued
+    max: 10
+    fields:
+      slot:
+        description: "tg | meeting | pill | custom | all"
+        default: "all"
+      minutes:
+        description: "Минуты отсрочки (0 = дефолт слота: meeting=4, tg/custom=10, pill=15)"
+        default: 0
+    sequence:
+      - variables:
+          req_slot: "{{ slot | default('all', true) | lower | trim }}"
+          req_min: "{{ minutes | default(0) | int(0) }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ req_slot in ['tg', 'meeting', 'pill', 'custom'] }}"
+            sequence:
+              - action: script.ack_reminder_snooze_single
+                data:
+                  slot: "{{ req_slot }}"
+                  minutes: "{{ req_min }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ req_slot == 'all' }}"
+            sequence:
+              - repeat:
+                  for_each: ["tg", "meeting", "pill", "custom"]
+                  sequence:
+                    - if:
+                        - condition: template
+                          value_template: "{{ is_state('input_boolean.ack_' ~ repeat.item ~ '_active', 'on') }}"
+                      then:
+                        - action: script.ack_reminder_snooze_single
+                          data:
+                            slot: "{{ repeat.item }}"
+                            minutes: "{{ req_min }}"
+
+  # Безопасные сервисные скрипты для дашборда
+  ack_test_soft_custom:
+    alias: "ack_test_soft_custom"
+    mode: single
+    sequence:
+      - action: script.ack_reminder_start
+        data:
+          slot: "custom"
+          title: "🔔 Проверка системы напоминаний"
+          message: "Тестовое напоминание. Нажмите «Принял» или «Отложить» в Телеграме, на телефоне или на панели."
+          tts_text: "Проверка системы гарантированных напоминаний. Скажите Алиса, принял."
+          url: ""
+          snooze_minutes: 10
+
+  ack_test_speaker_zap:
+    alias: "ack_test_speaker_zap"
+    mode: single
+    sequence:
+      - action: media_player.play_media
+        continue_on_error: true
+        target:
+          entity_id: media_player.yandex_station_m105j4010yy1mk
+        data:
+          media_content_id: "Проверка связи. Система напоминаний готова к работе."
+          media_content_type: text
+          extra:
+            volume_level: "{{ states('input_number.ack_speaker_volume') | float(0.65) }}"
+
+  ack_pill_reset_cycle:
+    alias: "ack_pill_reset_cycle"
+    mode: single
+    sequence:
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.ack_pill_active
+            - input_boolean.ack_pill_dose1_taken
+            - input_boolean.ack_pill_dose2_taken
+      - action: timer.cancel
+        continue_on_error: true
+        target:
+          entity_id:
+            - timer.ack_pill_snooze
+            - timer.ack_pill_wakeup_delay
+            - timer.ack_pill_dose2_gap
+      - action: script.turn_off
+        continue_on_error: true
+        target:
+          entity_id: script.ack_escalate_pill
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ack_pill_stage
+        data:
+          value: "idle"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  AUTOMATIONS (английский alias: ack_..., русский понятный id)
+# ──────────────────────────────────────────────────────────────────────────────
+
+automation:
+  # 1. Одноразовая инициализация дефолтов при первом запуске и восстановление активных слотов после рестарта HA
+  - id: "Напоминания: первичная инициализация настроек и восстановление после рестарта"
+    alias: ack_startup_init_and_restore
+    description: "Устанавливает стартовые значения настроек один раз (без initial: в YAML) и возобновляет активные эскалации после перезапуска HA."
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - if:
+          - condition: state
+            entity_id: input_boolean.ack_defaults_initialized
+            state: "off"
+        then:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.ack_enabled
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ack_speaker_volume
+            data:
+              value: 0.65
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ack_pill_interval_hours
+            data:
+              value: 13
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.ack_sleep_gap_hours
+            data:
+              value: 4
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ack_meeting_url
+            data:
+              value: "https://t.me/c/2216521533/5680"
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ack_pill_stage
+            data:
+              value: "idle"
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ack_last_activity_ts
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.ack_defaults_initialized
+      # Восстановление активных напоминаний (не на snooze) после рестарта HA
+      - delay:
+          seconds: 15
+      - if:
+          - condition: state
+            entity_id: input_boolean.ack_enabled
+            state: "on"
+        then:
+          - repeat:
+              for_each: ["tg", "meeting", "pill", "custom"]
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: >-
+                        {{ is_state('input_boolean.ack_' ~ repeat.item ~ '_active', 'on')
+                           and is_state('timer.ack_' ~ repeat.item ~ '_snooze', 'idle') }}
+                  then:
+                    - action: script.turn_on
+                      target:
+                        entity_id: "script.ack_escalate_{{ repeat.item }}"
+
+  # 2. Захват message_id по событию telegram_sent для всех 4 слотов
+  - id: "Напоминания: захват message_id сообщений Телеграма"
+    alias: ack_capture_telegram_sent
+    description: "Сохраняет message_id отправленных уведомлений ack_<slot> для последующего редактирования."
+    mode: queued
+    max: 20
+    triggers:
+      - trigger: event
+        event_type: telegram_sent
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.event.data.message_tag is defined
+             and trigger.event.data.message_id is defined
+             and trigger.event.data.message_tag in ['ack_tg', 'ack_meeting', 'ack_pill', 'ack_custom'] }}
+    actions:
+      - variables:
+          slot_id: "{{ trigger.event.data.message_tag | replace('ack_', '') }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "input_text.ack_{{ slot_id }}_tg_msg_id"
+        data:
+          value: "{{ trigger.event.data.message_id | string }}"
+
+  # 3. Обработка нажатий inline-кнопок Telegram (/ack_<slot>, /snooze_<slot>)
+  - id: "Напоминания: обработка кнопок подтверждения и отсрочки в Телеграме"
+    alias: ack_handle_telegram_callbacks
+    description: "Реагирует на нажатие кнопок «Принял» и «Отложить» в Телеграме."
+    mode: queued
+    max: 20
+    triggers:
+      - trigger: event
+        event_type: telegram_callback
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set cmd = trigger.event.data.command | default('', true) %}
+          {{ cmd in ['/ack_tg', '/ack_meeting', '/ack_pill', '/ack_custom',
+                     '/snooze_tg', '/snooze_meeting', '/snooze_pill', '/snooze_custom'] }}
+    actions:
+      - variables:
+          cmd: "{{ trigger.event.data.command }}"
+          is_ack: "{{ cmd.startswith('/ack_') }}"
+          slot_id: "{{ cmd | replace('/ack_', '') | replace('/snooze_', '') }}"
+      - if:
+          - condition: template
+            value_template: "{{ trigger.event.data.id is defined }}"
+        then:
+          - action: telegram_bot.answer_callback_query
+            continue_on_error: true
+            data:
+              callback_query_id: "{{ trigger.event.data.id }}"
+              message: "{{ 'Подтверждено' if is_ack else 'Отложено' }}"
+      - if:
+          - condition: template
+            value_template: "{{ is_ack }}"
+        then:
+          - action: script.ack_reminder_confirm
+            data:
+              slot: "{{ slot_id }}"
+              source_label: "Кнопка в Телеграме"
+        else:
+          - action: script.ack_reminder_snooze
+            data:
+              slot: "{{ slot_id }}"
+
+  # 4. Обработка кнопок на телефоне (mobile_app_notification_action)
+  - id: "Напоминания: обработка кнопок подтверждения и отсрочки на телефоне"
+    alias: ack_handle_mobile_actions
+    description: "Реагирует на нажатие кнопок ACK_* и SNOOZE_* на экране блокировки телефона."
+    mode: queued
+    max: 20
+    triggers:
+      - trigger: event
+        event_type: mobile_app_notification_action
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set act = trigger.event.data.action | default('', true) %}
+          {{ act in ['ACK_TG', 'ACK_MEETING', 'ACK_PILL', 'ACK_CUSTOM',
+                     'SNOOZE_TG', 'SNOOZE_MEETING', 'SNOOZE_PILL', 'SNOOZE_CUSTOM'] }}
+    actions:
+      - variables:
+          act: "{{ trigger.event.data.action }}"
+          is_ack: "{{ act.startswith('ACK_') }}"
+          slot_id: "{{ (act | replace('ACK_', '') | replace('SNOOZE_', '')) | lower }}"
+      - if:
+          - condition: template
+            value_template: "{{ is_ack }}"
+        then:
+          - action: script.ack_reminder_confirm
+            data:
+              slot: "{{ slot_id }}"
+              source_label: "Кнопка на телефоне"
+        else:
+          - action: script.ack_reminder_snooze
+            data:
+              slot: "{{ slot_id }}"
+
+  # 5. Возобновление напоминания после истечения таймера отсрочки (snooze)
+  - id: "Напоминания: повторный запуск после окончания отсрочки"
+    alias: ack_handle_snooze_finished
+    description: "Автоматически перезапускает напоминание после завершения таймера snooze, если слот всё ещё активен."
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_tg_snooze
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_meeting_snooze
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_pill_snooze
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_custom_snooze
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ack_enabled
+        state: "on"
+    actions:
+      - variables:
+          slot_id: "{{ trigger.event.data.entity_id | replace('timer.ack_', '') | replace('_snooze', '') }}"
+          url_entity: "{{ 'input_text.ack_meeting_url_active' if slot_id == 'meeting' else 'input_text.ack_' ~ slot_id ~ '_url' }}"
+      - condition: template
+        value_template: "{{ is_state('input_boolean.ack_' ~ slot_id ~ '_active', 'on') }}"
+      - action: script.ack_reminder_start
+        data:
+          slot: "{{ slot_id }}"
+          title: "{{ states('input_text.ack_' ~ slot_id ~ '_title') }}"
+          message: "{{ states('input_text.ack_' ~ slot_id ~ '_message') }}"
+          tts_text: "{{ states('input_text.ack_' ~ slot_id ~ '_tts') }}"
+          url: "{{ states(url_entity) }}"
+
+  # 6. Вебхук от Telegram-слушателя (ZAPNOTEBOOK / резерв ZAPPC)
+  - id: "Напоминания: приём событий Телеграма по вебхуку"
+    alias: ack_webhook_telegram_receiver
+    description: "Принимает heartbeat, trigger_mention и auto_ack по защищённому webhook_id."
+    mode: queued
+    max: 30
+    triggers:
+      - trigger: webhook
+        webhook_id: !secret ack_reminders_webhook_id
+        local_only: false
+        allowed_methods:
+          - POST
+    actions:
+      - variables:
+          payload: "{{ trigger.json if trigger.json is mapping else {} }}"
+          act: "{{ payload.get('action', '') | string | trim }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ act == 'heartbeat' }}"
+            sequence:
+              - variables:
+                  hb_ts: "{{ payload.get('ts', now().timestamp() | int) }}"
+                  hb_host: "{{ payload.get('source_host', 'unknown') | string }}"
+                  hb_state: "{{ payload.get('state', 'connected') | string }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ack_tg_primary_heartbeat
+                data:
+                  value: "{{ (hb_ts ~ '|' ~ hb_host ~ '|' ~ hb_state)[:250] }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ act == 'trigger_mention' and is_state('input_boolean.ack_enabled', 'on') }}"
+            sequence:
+              - variables:
+                  ev_id: "{{ payload.get('event_id', '') | string | trim }}"
+                  last_ev: "{{ states('input_text.ack_tg_last_event_id') | default('', true) | trim }}"
+                  chat_id_str: "{{ payload.get('chat_id', '') | string | trim }}"
+                  sender_name: "{{ (payload.get('sender') or payload.get('sender_name') or 'Коллега') | string | trim }}"
+                  chat_title: "{{ payload.get('chat_title', 'Телеграм') | string | trim }}"
+                  preview: "{{ payload.get('text', 'Вас упомянули в сообщении') | string | trim }}"
+                  msg_title: "{{ payload.get('title', '💬 Упоминание в ' ~ chat_title) | string | trim }}"
+                  msg_body: "{{ payload.get('message', sender_name ~ ': ' ~ preview) | string | trim }}"
+                  msg_tts: "{{ payload.get('tts_text', 'Новое сообщение в Телеграме от ' ~ sender_name ~ ' в чате ' ~ chat_title) | string | trim }}"
+                  msg_url: "{{ payload.get('url', '') | string | trim }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ ev_id != '' and ev_id == last_ev }}"
+                then:
+                  - stop: "Дубликат event_id"
+              - if:
+                  - condition: template
+                    value_template: "{{ ev_id != '' }}"
+                then:
+                  - action: input_text.set_value
+                    target:
+                      entity_id: input_text.ack_tg_last_event_id
+                    data:
+                      value: "{{ ev_id[:120] }}"
+              - action: input_text.set_value
+                target:
+                  entity_id: input_text.ack_tg_active_chat_id
+                data:
+                  value: "{{ chat_id_str[:60] }}"
+              - action: script.ack_reminder_start
+                data:
+                  slot: "tg"
+                  title: "{{ msg_title }}"
+                  message: "{{ msg_body }}"
+                  tts_text: "{{ msg_tts }}"
+                  url: "{{ msg_url }}"
+                  snooze_minutes: 10
+          - conditions:
+              - condition: template
+                value_template: "{{ act == 'auto_ack' }}"
+            sequence:
+              - variables:
+                  chat_id_str: "{{ payload.get('chat_id', '') | string | trim }}"
+                  active_chat: "{{ states('input_text.ack_tg_active_chat_id') | default('', true) | trim }}"
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ is_state('input_boolean.ack_tg_active', 'on')
+                         and chat_id_str != ''
+                         and chat_id_str == active_chat }}
+                then:
+                  - action: script.ack_reminder_confirm
+                    data:
+                      slot: "tg"
+                      source_label: "Авто-отбой: ответ/прочтение в чате"
+
+  # 7. Утреннее совещание в 09:55:00 по рабочим дням РФ
+  - id: "Напоминания: утреннее совещание в 09:55 по рабочим дням"
+    alias: ack_morning_meeting_reminder
+    description: "Запускает гарантированное напоминание за 5 минут до совещания в 10:00 по производственному календарю РФ."
+    mode: single
+    triggers:
+      - trigger: time
+        at: "09:55:00"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ack_enabled
+        state: "on"
+      - condition: template
+        value_template: >-
+          {{ is_state('binary_sensor.workday_sensor', 'on')
+             or is_state('binary_sensor.workday_sensor_ru', 'on') }}
+    actions:
+      - action: script.ack_reminder_start
+        data:
+          slot: "meeting"
+          title: "📞 Совещание через 5 минут (10:00)"
+          message: "В 10:00 начинается утреннее совещание. Нажмите на уведомление, чтобы открыть ссылку."
+          tts_text: "Внимание! Через пять минут начинается утреннее совещание в десять ноль ноль."
+          url: "{{ states('input_text.ack_meeting_url') }}"
+          snooze_minutes: 4
+
+  # 8. Детектор пробуждения под плавающий график сна (для 1-й таблетки через 15 мин)
+  - id: "Напоминания: отслеживание пробуждения для приёма таблеток"
+    alias: ack_pill_wakeup_detector
+    description: "Отслеживает активность по датчикам движения, свету и снятию телефона с зарядки; после перерыва сна запускает 15-минутный отсчёт до 1-й таблетки."
+    mode: queued
+    max: 15
+    triggers:
+      - trigger: state
+        entity_id:
+          - binary_sensor.motion_bathroom1_occupancy
+          - binary_sensor.motion_bathroom2_occupancy
+          - binary_sensor.motion_kitchen1_occupancy
+          - binary_sensor.motion_corridor1_occupancy
+        to: "on"
+      - trigger: state
+        entity_id: sensor.zapphone_charger_type_2
+        from:
+          - "ac"
+          - "usb"
+          - "wireless"
+        to: "none"
+      - trigger: state
+        entity_id:
+          - light.light_bathroom
+          - light.light_corridor
+          - switch.switch_zap
+        to: "on"
+    actions:
+      - variables:
+          now_ts: "{{ now().timestamp() }}"
+          last_act_raw: "{{ states('input_datetime.ack_last_activity_ts') }}"
+          last_act_ts: "{{ as_timestamp(last_act_raw, now_ts) }}"
+          gap_sec: "{{ (now_ts - last_act_ts) | float(0) }}"
+          sleep_gap_sec: "{{ states('input_number.ack_sleep_gap_hours') | float(4) * 3600 }}"
+          cycle_start_raw: "{{ states('input_datetime.ack_pill_cycle_start_ts') }}"
+          cycle_start_ts: "{{ as_timestamp(cycle_start_raw, 0) }}"
+          cycle_age_sec: "{{ (now_ts - cycle_start_ts) | float(999999) if cycle_start_ts > 86400 else 999999 }}"
+          dose2_waiting: "{{ is_state('timer.ack_pill_dose2_gap', 'active') }}"
+      - if:
+          - condition: template
+            value_template: >-
+              {{ is_state('input_boolean.ack_enabled', 'on')
+                 and gap_sec >= sleep_gap_sec
+                 and not is_state('input_boolean.ack_pill_active', 'on')
+                 and not is_state('timer.ack_pill_wakeup_delay', 'active')
+                 and not dose2_waiting
+                 and (cycle_start_ts <= 86400 or is_state('input_text.ack_pill_stage', 'idle') or cycle_age_sec >= 50400) }}
+        then:
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.ack_pill_dose1_taken
+                - input_boolean.ack_pill_dose2_taken
+                - input_boolean.ack_pill_active
+          - action: timer.cancel
+            continue_on_error: true
+            target:
+              entity_id:
+                - timer.ack_pill_dose2_gap
+                - timer.ack_pill_snooze
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.ack_pill_cycle_start_ts
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+          - action: input_text.set_value
+            target:
+              entity_id: input_text.ack_pill_stage
+            data:
+              value: "wakeup_wait"
+          - action: timer.start
+            target:
+              entity_id: timer.ack_pill_wakeup_delay
+            data:
+              duration: "00:15:00"
+      # Всегда обновляем время последней активности
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ack_last_activity_ts
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  # 9. Запуск напоминания о 1-й таблетке (через 15 мин после пробуждения)
+  - id: "Напоминания: запуск сигнала 1-й таблетки после пробуждения"
+    alias: ack_pill_dose1_trigger
+    description: "По окончании 15-минутного таймера пробуждения запускает гарантированное напоминание о 1-й таблетке."
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_pill_wakeup_delay
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ack_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ack_pill_dose1_taken
+        state: "off"
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ack_pill_stage
+        data:
+          value: "dose1_due"
+      - action: script.ack_reminder_start
+        data:
+          slot: "pill"
+          title: "💊 Пора выпить 1-ю таблетку"
+          message: "Прошло 15 минут после пробуждения. Подтвердите приём 1-й таблетки, чтобы запустить отсчёт до 2-й."
+          tts_text: "Напоминание! Пора выпить первую таблетку."
+          url: ""
+          snooze_minutes: 15
+
+  # 10. Запуск напоминания о 2-й таблетке (через заданный интервал, по умолчанию 13 ч)
+  - id: "Напоминания: запуск сигнала 2-й таблетки по таймеру интервала"
+    alias: ack_pill_dose2_trigger
+    description: "По окончании таймера интервала между дозами запускает гарантированное напоминание о 2-й таблетке."
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ack_pill_dose2_gap
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ack_enabled
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.ack_pill_dose2_taken
+        state: "off"
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.ack_pill_stage
+        data:
+          value: "dose2_due"
+      - action: script.ack_reminder_start
+        data:
+          slot: "pill"
+          title: "💊 Пора выпить 2-ю таблетку"
+          message: "Прошёл заданный интервал после первой дозы. Подтвердите приём 2-й таблетки."
+          tts_text: "Напоминание! Пора выпить вторую таблетку."
+          url: ""
+          snooze_minutes: 15
+
+  # 11. Голосовая обратная связь через Yaha Cloud / Алису (3 виртуальных переключателя)
+  - id: "Напоминания: голосовая команда Алисе — Принял"
+    alias: ack_voice_confirm_handler
+    description: "Обрабатывает включение виртуального переключателя «Подтверждение уведомления» от Алисы."
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.ack_voice_confirm
+        to: "on"
+    actions:
+      - action: script.ack_reminder_confirm
+        data:
+          slot: "all"
+          source_label: "Голосовая команда Алисе"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ack_voice_confirm
+
+  - id: "Напоминания: голосовая команда Алисе — Выпил таблетку"
+    alias: ack_voice_pill_taken_handler
+    description: "Обрабатывает включение виртуального переключателя «Приём таблетки» от Алисы."
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.ack_voice_pill_taken
+        to: "on"
+    actions:
+      - action: script.ack_reminder_confirm
+        data:
+          slot: "pill"
+          source_label: "Голосовая команда Алисе"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ack_voice_pill_taken
+
+  - id: "Напоминания: голосовая команда Алисе — Отложи напоминание"
+    alias: ack_voice_snooze_handler
+    description: "Обрабатывает включение виртуального переключателя «Отсрочка уведомления» от Алисы."
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.ack_voice_snooze
+        to: "on"
+    actions:
+      - action: script.ack_reminder_snooze
+        data:
+          slot: "all"
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.ack_voice_snooze
+
+  # 12. Приём кликов Bluetooth-метки с кнопкой по MQTT
+  - id: "Напоминания: обработка нажатий Bluetooth-кнопки по MQTT"
+    alias: ack_ble_button_mqtt_handler
+    description: "Одиночное нажатие подтверждает активный сигнал или досрочно отмечает таблетку; двойное — откладывает."
+    mode: queued
+    max: 10
+    triggers:
+      - trigger: mqtt
+        topic: "homeassistant/ack_reminders/ble_button"
+    actions:
+      - variables:
+          click_type: "{{ trigger.payload | string | lower | trim }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ click_type == 'single' }}"
+            sequence:
+              - choose:
+                  - conditions:
+                      - condition: state
+                        entity_id: input_boolean.ack_pill_active
+                        state: "on"
+                    sequence:
+                      - action: script.ack_reminder_confirm
+                        data:
+                          slot: "pill"
+                          source_label: "Bluetooth-кнопка"
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ is_state('input_boolean.ack_tg_active', 'on')
+                             or is_state('input_boolean.ack_meeting_active', 'on')
+                             or is_state('input_boolean.ack_custom_active', 'on') }}
+                    sequence:
+                      - action: script.ack_reminder_confirm
+                        data:
+                          slot: "all"
+                          source_label: "Bluetooth-кнопка"
+                  - conditions:
+                      - condition: template
+                        value_template: >-
+                          {{ is_state('input_boolean.ack_pill_dose1_taken', 'off')
+                             or is_state('input_boolean.ack_pill_dose2_taken', 'off') }}
+                    sequence:
+                      - variables:
+                          was_d1: "{{ is_state('input_boolean.ack_pill_dose1_taken', 'on') }}"
+                      - action: script.ack_reminder_confirm
+                        data:
+                          slot: "pill"
+                          source_label: "Bluetooth-кнопка (досрочно)"
+                      - action: media_player.play_media
+                        continue_on_error: true
+                        target:
+                          entity_id: media_player.yandex_station_m105j4010yy1mk
+                        data:
+                          media_content_id: >-
+                            {{ 'Приём второй таблетки отмечен.' if was_d1 else 'Приём первой таблетки отмечен. Запущен отсчёт до второй.' }}
+                          media_content_type: text
+                          extra:
+                            volume_level: "{{ [states('input_number.ack_speaker_volume') | float(0.65), 0.45] | min }}"
+          - conditions:
+              - condition: template
+                value_template: "{{ click_type == 'double' }}"
+            sequence:
+              - action: script.ack_reminder_snooze
+                data:
+                  slot: "all"

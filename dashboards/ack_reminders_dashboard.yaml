@@ -1,0 +1,132 @@
+title: Напоминания
+views:
+  - title: Напоминания
+    path: overview
+    icon: mdi:bell-ring
+    cards:
+      # 1. Текущее состояние и быстрые действия
+      - type: entities
+        title: Состояние системы
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.ack_enabled
+            name: Напоминания включены
+          - entity: sensor.ack_active_reminders_summary
+            name: Текущие сигналы
+          - entity: sensor.ack_telegram_listener_status
+            name: Слушатель Телеграма
+          - entity: sensor.ack_zappc_bridge_status
+            name: Мост на компьютере ZAPPC
+
+      # 2. Быстрое управление активными сигналами
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Подтвердить всё
+            icon: mdi:check-circle
+            tap_action:
+              action: call-service
+              service: script.ack_reminder_confirm
+              service_data:
+                slot: all
+                source_label: Панель управления
+          - type: button
+            name: Отложить всё
+            icon: mdi:alarm-snooze
+            tap_action:
+              action: call-service
+              service: script.ack_reminder_snooze
+              service_data:
+                slot: all
+
+      # 3. Активные каналы по слотам
+      - type: entities
+        title: Активные напоминания по видам
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.ack_tg_active
+            name: Сообщение в Телеграме
+          - entity: timer.ack_tg_snooze
+            name: Пауза (Телеграм)
+          - entity: input_boolean.ack_meeting_active
+            name: Утреннее совещание
+          - entity: timer.ack_meeting_snooze
+            name: Пауза (совещание)
+          - entity: input_boolean.ack_pill_active
+            name: Приём таблетки
+          - entity: timer.ack_pill_snooze
+            name: Пауза (таблетка)
+          - entity: input_boolean.ack_custom_active
+            name: Прочее напоминание
+          - entity: timer.ack_custom_snooze
+            name: Пауза (прочее)
+
+      # 4. Таблетки и отсчёт между дозами
+      - type: entities
+        title: Таблетки и график сна
+        show_header_toggle: false
+        entities:
+          - entity: sensor.ack_pill_status_summary
+            name: Статус приёма
+          - entity: input_boolean.ack_pill_dose1_taken
+            name: Первая таблетка принята
+          - entity: input_boolean.ack_pill_dose2_taken
+            name: Вторая таблетка принята
+          - entity: timer.ack_pill_wakeup_delay
+            name: Отсчёт после пробуждения (15 мин)
+          - entity: timer.ack_pill_dose2_gap
+            name: Отсчёт до второй таблетки
+          - entity: input_datetime.ack_last_activity_ts
+            name: Последняя активность в доме
+          - entity: input_datetime.ack_pill_cycle_start_ts
+            name: Начало текущего дня
+
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Отметить приём таблетки
+            icon: mdi:pill
+            tap_action:
+              action: call-service
+              service: script.ack_reminder_confirm
+              service_data:
+                slot: pill
+                source_label: Панель управления
+          - type: button
+            name: Сбросить цикл таблеток
+            icon: mdi:restart
+            tap_action:
+              action: call-service
+              service: script.ack_pill_reset_cycle
+
+      # 5. Настройки
+      - type: entities
+        title: Настройки напоминаний
+        show_header_toggle: false
+        entities:
+          - entity: input_number.ack_speaker_volume
+            name: Громкость колонки в комнате
+          - entity: input_number.ack_pill_interval_hours
+            name: Интервал между таблетками (часы)
+          - entity: input_number.ack_sleep_gap_hours
+            name: Пауза тишины для определения сна (часы)
+          - entity: input_text.ack_meeting_url
+            name: Ссылка на утреннее совещание
+          - entity: binary_sensor.workday_sensor
+            name: Сегодня рабочий день
+
+      # 6. Голосовые команды и безопасная проверка
+      - type: entities
+        title: Проверка работы
+        show_header_toggle: false
+        entities:
+          - entity: script.ack_test_soft_custom
+            name: Запустить тестовое напоминание
+          - entity: script.ack_test_speaker_zap
+            name: Проверить голос на колонке в комнате
+          - entity: input_boolean.ack_voice_confirm
+            name: Голосовой сигнал «Принял»
+          - entity: input_boolean.ack_voice_pill_taken
+            name: Голосовой сигнал «Выпил таблетку»
+          - entity: input_boolean.ack_voice_snooze
+            name: Голосовой сигнал «Отложить»
