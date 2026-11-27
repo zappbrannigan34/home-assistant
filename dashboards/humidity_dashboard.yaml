@@ -9,22 +9,14 @@ views:
       - type: custom:plotly-graph
         # ENTITIES FIRST — $fn stores vars that layout reads
         entities:
-          # 1. Current Humidity (y1) — stores min/max in vars
-          - entity: sensor.sensor_zap_humidity
+          # 1. Filtered Humidity (y1, lowpass tc=4, ~43s lag, без лишнего Plotly EMA)
+          - entity: sensor.humidity_zap_filtered
             name: Humidity
             yaxis: y
             filters:
-              - median:
-                  window_size: 5
-                  extended: true
-              - exponential_moving_average:
-                  alpha: 0.06
-              - sliding_window_moving_average:
-                  window_size: 5
-                  extended: true
               - fn: |-
                   ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
                     if (nums.length > 0) {
                       vars.hum_min = Math.min(...nums);
                       vars.hum_max = Math.max(...nums);
@@ -37,27 +29,42 @@ views:
             line:
               color: '#2196F3'
               width: 2
-              shape: spline
-              smoothing: 1
             connectgaps: true
             showlegend: true
 
-          # 2. Error (y2) — stores min/max in vars
+          # 2. Historical Target Humidity (y1, реальная кривая уставки по времени)
+          - entity: sensor.humidity_zap_target_humidity
+            name: Target
+            yaxis: y
+            filters:
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.tgt_min = Math.min(...nums);
+                      vars.tgt_max = Math.max(...nums);
+                    } else {
+                      vars.tgt_min = undefined;
+                      vars.tgt_max = undefined;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#FF9800'
+              width: 2
+              dash: dot
+              shape: hv
+            connectgaps: true
+            showlegend: true
+
+          # 3. Error (y2, синхронно с Humidity без каузального EMA-сдвига)
           - entity: sensor.humidity_zap_error
             name: Error
             yaxis: y2
             filters:
-              - median:
-                  window_size: 3
-                  extended: true
-              - exponential_moving_average:
-                  alpha: 0.10
-              - sliding_window_moving_average:
-                  window_size: 5
-                  extended: true
               - fn: |-
                   ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
                     if (nums.length > 0) {
                       vars.err_min = Math.min(...nums);
                       vars.err_max = Math.max(...nums);
@@ -70,12 +77,10 @@ views:
             line:
               color: '#F44336'
               width: 1
-              shape: spline
-              smoothing: 1
             connectgaps: true
             showlegend: true
 
-          # 3. Effective Intensity (y3) — step line (0..7)
+          # 4. Effective Intensity (y3) — step line (0..7)
           - entity: sensor.humidifier_zap_effective_intensity
             name: Effective Intensity
             yaxis: y3
@@ -90,30 +95,18 @@ views:
         layout:
           height: 600
           shapes:
-            # ±0.5% deadband zone around effective target
+            # ±0.3% целевой коридор равновесия вокруг текущей уставки
             - type: rect
               xref: paper
               x0: 0
               x1: 1
               yref: y
-              y0: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) - 0.5
-              y1: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) + 0.5
+              y0: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) - 0.3
+              y1: $ex (parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35) + 0.3
               fillcolor: rgba(255, 152, 0, 0.08)
               line:
                 width: 0
               layer: below
-            # Target humidity line on y1
-            - type: line
-              xref: paper
-              x0: 0
-              x1: 1
-              yref: y
-              y0: $ex parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35
-              y1: $ex parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35
-              line:
-                color: '#FF9800'
-                width: 2
-                dash: dot
             # Zero error line on y2
             - type: line
               xref: paper
@@ -134,6 +127,10 @@ views:
                   label: 15m
                   step: minute
                   stepmode: backward
+                - count: 1
+                  label: 1h
+                  step: hour
+                  stepmode: backward
                 - count: 6
                   label: 6h
                   step: hour
@@ -148,7 +145,6 @@ views:
                   stepmode: backward
 
           # y1: Humidity (%) — effective target всегда посередине, симметричный zoom
-          #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
           yaxis:
             title: Humidity (%)
             side: left
@@ -157,14 +153,14 @@ views:
             range: |-
               $fn ({vars, hass}) => {
                 const target = parseFloat(hass.states['sensor.humidity_zap_target_humidity']?.state) || 35;
-                const hMin = vars.hum_min ?? target;
-                const hMax = vars.hum_max ?? target;
+                const hMin = Math.min(vars.hum_min ?? target, vars.tgt_min ?? target);
+                const hMax = Math.max(vars.hum_max ?? target, vars.tgt_max ?? target);
                 const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 1.5);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
               }
 
-          # y2: Error (%) — 0 всегда посередине = визуально совпадает с target на y1
+          # y2: Error (%) — одинаковый минимальный размах 1.5% с y1
           yaxis2:
             title: Error (%)
             side: right
@@ -175,7 +171,7 @@ views:
               $fn ({vars}) => {
                 const eMin = vars.err_min ?? -5;
                 const eMax = vars.err_max ?? 5;
-                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1);
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1.5);
                 const padded = maxErr * 1.15;
                 return [-padded, padded];
               }
@@ -194,7 +190,7 @@ views:
             fixedrange: true
 
         time_offset: 5m
-        hours_to_show: 0.25
+        hours_to_show: 6
         refresh_interval: 10
         autorange_after_scroll: false
         disable_pinch_to_zoom: true
@@ -297,14 +293,37 @@ views:
           - entity: sensor.sensor_zap_humidity
             name: Raw Humidity
           - entity: sensor.humidity_zap_slope
-            name: Slope (5m)
+            name: Slope (3m)
           - entity: sensor.humidity_zap_error
             name: Error
           - entity: sensor.humidity_zap_rate
-            name: Rate
+            name: Rate (OLS 3m)
           - entity: sensor.humidity_zap_recommended_intensity
             name: Recommended Intensity
             icon: mdi:gauge
+          - type: attribute
+            entity: sensor.humidity_zap_recommended_intensity
+            attribute: equilibrium_ml_h
+            name: Equilibrium Loss (I)
+            icon: mdi:scale-balance
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.humidity_zap_recommended_intensity
+            attribute: demand_ml_h
+            name: PID Demand
+            icon: mdi:chart-bell-curve-cumulative
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.humidity_zap_recommended_intensity
+            attribute: window_ff_ml_h
+            name: Window Compensation
+            icon: mdi:window-open-variant
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.humidity_zap_recommended_intensity
+            attribute: control_mode
+            name: PID State
+            icon: mdi:state-machine
           - entity: sensor.humidifier_zap_effective_intensity
             name: Effective Intensity
             icon: mdi:air-humidifier
@@ -375,22 +394,14 @@ views:
       - type: custom:plotly-graph
         # ENTITIES FIRST — $fn stores vars that layout reads
         entities:
-          # 1. Current Humidity (y1) — stores min/max in vars
-          - entity: sensor.sensor_eva_humidity
+          # 1. Filtered Humidity (y1, lowpass tc=4, ~43s lag, без лишнего Plotly EMA)
+          - entity: sensor.humidity_filtered
             name: Humidity
             yaxis: y
             filters:
-              - median:
-                  window_size: 5
-                  extended: true
-              - exponential_moving_average:
-                  alpha: 0.06
-              - sliding_window_moving_average:
-                  window_size: 5
-                  extended: true
               - fn: |-
                   ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
                     if (nums.length > 0) {
                       vars.hum_min = Math.min(...nums);
                       vars.hum_max = Math.max(...nums);
@@ -403,27 +414,42 @@ views:
             line:
               color: '#2196F3'
               width: 2
-              shape: spline
-              smoothing: 1
             connectgaps: true
             showlegend: true
 
-          # 2. Error (y2) — stores min/max in vars
+          # 2. Historical Target Humidity (y1, реальная кривая уставки по времени)
+          - entity: sensor.target_humidity
+            name: Target
+            yaxis: y
+            filters:
+              - fn: |-
+                  ({ys, vars}) => {
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
+                    if (nums.length > 0) {
+                      vars.tgt_min = Math.min(...nums);
+                      vars.tgt_max = Math.max(...nums);
+                    } else {
+                      vars.tgt_min = undefined;
+                      vars.tgt_max = undefined;
+                    }
+                    return null;
+                  }
+            line:
+              color: '#FF9800'
+              width: 2
+              dash: dot
+              shape: hv
+            connectgaps: true
+            showlegend: true
+
+          # 3. Error (y2, синхронно с Humidity без каузального EMA-сдвига)
           - entity: sensor.humidity_error
             name: Error
             yaxis: y2
             filters:
-              - median:
-                  window_size: 3
-                  extended: true
-              - exponential_moving_average:
-                  alpha: 0.10
-              - sliding_window_moving_average:
-                  window_size: 5
-                  extended: true
               - fn: |-
                   ({ys, vars}) => {
-                    const nums = ys.filter(v => v !== null && !isNaN(+v)).map(Number);
+                    const nums = ys.filter(v => v !== null && v !== '' && !isNaN(+v)).map(Number);
                     if (nums.length > 0) {
                       vars.err_min = Math.min(...nums);
                       vars.err_max = Math.max(...nums);
@@ -436,12 +462,10 @@ views:
             line:
               color: '#F44336'
               width: 1
-              shape: spline
-              smoothing: 1
             connectgaps: true
             showlegend: true
 
-          # 3. Effective Intensity (y3) — step line (0..7)
+          # 4. Effective Intensity (y3) — step line (0..7)
           - entity: sensor.humidifier_effective_intensity
             name: Effective Intensity
             yaxis: y3
@@ -456,30 +480,18 @@ views:
         layout:
           height: 600
           shapes:
-            # ±0.5% deadband zone around effective target
+            # ±0.3% целевой коридор равновесия вокруг текущей уставки
             - type: rect
               xref: paper
               x0: 0
               x1: 1
               yref: y
-              y0: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) - 0.5
-              y1: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) + 0.5
+              y0: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) - 0.3
+              y1: $ex (parseFloat(hass.states['sensor.target_humidity']?.state) || 35) + 0.3
               fillcolor: rgba(255, 152, 0, 0.08)
               line:
                 width: 0
               layer: below
-            # Target humidity line on y1
-            - type: line
-              xref: paper
-              x0: 0
-              x1: 1
-              yref: y
-              y0: $ex parseFloat(hass.states['sensor.target_humidity']?.state) || 35
-              y1: $ex parseFloat(hass.states['sensor.target_humidity']?.state) || 35
-              line:
-                color: '#FF9800'
-                width: 2
-                dash: dot
             # Zero error line on y2
             - type: line
               xref: paper
@@ -500,6 +512,10 @@ views:
                   label: 15m
                   step: minute
                   stepmode: backward
+                - count: 1
+                  label: 1h
+                  step: hour
+                  stepmode: backward
                 - count: 6
                   label: 6h
                   step: hour
@@ -514,7 +530,6 @@ views:
                   stepmode: backward
 
           # y1: Humidity (%) — effective target всегда посередине, симметричный zoom
-          #     autorange: false ОБЯЗАТЕЛЕН — autorange_after_scroll сбрасывает $fn range
           yaxis:
             title: Humidity (%)
             side: left
@@ -523,14 +538,14 @@ views:
             range: |-
               $fn ({vars, hass}) => {
                 const target = parseFloat(hass.states['sensor.target_humidity']?.state) || 35;
-                const hMin = vars.hum_min ?? target;
-                const hMax = vars.hum_max ?? target;
+                const hMin = Math.min(vars.hum_min ?? target, vars.tgt_min ?? target);
+                const hMax = Math.max(vars.hum_max ?? target, vars.tgt_max ?? target);
                 const maxDev = Math.max(Math.abs(hMax - target), Math.abs(hMin - target), 1.5);
                 const padded = maxDev * 1.15;
                 return [target - padded, target + padded];
               }
 
-          # y2: Error (%) — 0 всегда посередине = визуально совпадает с target на y1
+          # y2: Error (%) — одинаковый минимальный размах 1.5% с y1
           yaxis2:
             title: Error (%)
             side: right
@@ -541,7 +556,7 @@ views:
               $fn ({vars}) => {
                 const eMin = vars.err_min ?? -5;
                 const eMax = vars.err_max ?? 5;
-                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1);
+                const maxErr = Math.max(Math.abs(eMin), Math.abs(eMax), 1.5);
                 const padded = maxErr * 1.15;
                 return [-padded, padded];
               }
@@ -560,7 +575,7 @@ views:
             fixedrange: true
 
         time_offset: 5m
-        hours_to_show: 0.25
+        hours_to_show: 6
         refresh_interval: 10
         autorange_after_scroll: false
         disable_pinch_to_zoom: true
@@ -663,14 +678,37 @@ views:
           - entity: sensor.sensor_eva_humidity
             name: Raw Humidity
           - entity: sensor.humidity_slope
-            name: Slope (5m)
+            name: Slope (3m)
           - entity: sensor.humidity_error
             name: Error
           - entity: sensor.humidity_rate
-            name: Rate
+            name: Rate (OLS 3m)
           - entity: sensor.recommended_intensity
             name: Recommended Intensity
             icon: mdi:gauge
+          - type: attribute
+            entity: sensor.recommended_intensity
+            attribute: equilibrium_ml_h
+            name: Equilibrium Loss (I)
+            icon: mdi:scale-balance
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.recommended_intensity
+            attribute: demand_ml_h
+            name: PID Demand
+            icon: mdi:chart-bell-curve-cumulative
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.recommended_intensity
+            attribute: window_ff_ml_h
+            name: Window Compensation
+            icon: mdi:window-open-variant
+            suffix: ml/h
+          - type: attribute
+            entity: sensor.recommended_intensity
+            attribute: control_mode
+            name: PID State
+            icon: mdi:state-machine
           - entity: sensor.humidifier_effective_intensity
             name: Effective Intensity
             icon: mdi:air-humidifier

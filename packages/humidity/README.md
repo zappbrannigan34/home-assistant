@@ -57,21 +57,22 @@
 
 ---
 
-## 🧮 Сглаживание сигнала и PI+D-регулятор (`0..7`)
+## 🧮 Сглаживание сигнала и 2-DOF PID-регулятор в физических `мл/ч` (`custom_templates/humidity.jinja`)
 
-Логика идентична для обеих комнат (`eva` и `zap`):
+Вся математика управления комнатами `eva` и `zap` вынесена в единый детерминированный шаблон `custom_templates/humidity.jinja` (`calc_humidity_pid`, минутный такт `/1`, `controller_generation: 1` по аналогии с `custom_templates/ventilation.jinja`):
 
-1. **Сглаживание входной влажности (`lowpass`)**: нативные сенсоры `sensor.sensor_eva_humidity` и `sensor.sensor_zap_humidity` (~10.5 с интервал) фильтруются через `platform: filter` (`lowpass`, `time_constant: 18`, `precision: 2`, эффективная постоянная $\tau \approx 3\text{ мин}$) в `sensor.humidity_filtered` и `sensor.humidity_zap_filtered`, плюс 5-минутная производная `sensor.humidity_slope` / `sensor.humidity_zap_slope` (`platform: derivative`, по аналогии с CO₂-вентиляцией). На графиках `dashboards/humidity_dashboard.yaml` используется многоступенчатое сглаживание (`median` → `exponential_moving_average` → `sliding_window_moving_average`), а карточка gauge `Current` и диагностика показывают сглаженную влажность, raw и slope.
-2. **Скорость изменения** (`sensor.humidity_rate` / `sensor.humidity_zap_rate`, `%/мин`): 5-минутное окно по сглаженному сигналу `sensor.humidity_*_filtered` + EMA-сглаживание (`0.4 new + 0.6 old`).
-3. **Ошибка регулирования** (`sensor.humidity_error` / `sensor.humidity_zap_error`): `effective_target − filtered_humidity` с точностью `0.01%` (`round(2)`), атрибутами `raw_humidity`, `filtered_humidity`, `error_source: filtered_humidity_error`.
-4. **Прогноз ошибки на 5 минут**: `predicted_error = error − (rate × 5)`.
-5. **100% HA-управляемый PI+D-закон (`0..7`) с гистерезисом** (`sensor.recommended_intensity` / `sensor.humidity_zap_recommended_intensity`):
-   - Устройства работают в **`mode: "boost"` (`"5"`, программа «Интенсивность», `limits.humidity = 0`)** — встроенный гигростат и авто-режимы Polaris полностью отключены, интенсивность `1..7` задаётся только из HA через `number.*_intensity*`:
-   - включение из `0` при `error >= +0.30%` или (`error >= +0.15%` и `predicted_error >= +0.45%`);
-   - максимальная скорость **`7` (100% мощности)** при `error > +1.5%` или `predicted_error > +1.5%`;
-   - плавная модуляция `1..7` около цели (`integral_level + 1.8*error - 3.5*rate`, slew-ограничение `±2` ступени);
-   - выключение (`0`) при `error <= -0.45%` или (`error <= -0.15%` и `predicted_error <= -0.55%`).
-6. **Фактический выход и учёт воды (`Effective Intensity`, `water_consumed`, `hours_remaining`)**:
+1. **Быстрое подавление шума без фазовой слепоты (`lowpass`, `time_constant: 4`)**: нативные сенсоры `sensor.sensor_eva_humidity` и `sensor.sensor_zap_humidity` (~10.8 с интервал) фильтруются через `platform: filter` (`lowpass`, `time_constant: 4`, `precision: 2`, постоянная $\tau \approx 43\text{ с}$ вместо прежних `5 мин`) в `sensor.humidity_filtered` и `sensor.humidity_zap_filtered`, плюс 3-минутная производная `sensor.humidity_slope` / `sensor.humidity_zap_slope` (`platform: derivative`, `"00:03:00"`). На графиках `dashboards/humidity_dashboard.yaml` отображаются реальные `humidity_*_filtered`, историческая кривая `Target Humidity` и `Error` без каузального сглаживания Plotly.
+2. **Производная по измерению (`-dH/dt`, `%/мин`)**: 3-минутный наклон МНК по 4 минутным отсчётам `(3*h0 + h1 - h2 - 3*h3) / 10` (задержка `~2.2 мин` вместо `7.2 мин`, отсутствие рывков при смене уставки, сдвиг буфера строго по минутному триггеру `tick`).
+3. **Ошибка регулирования** (`sensor.humidity_error` / `sensor.humidity_zap_error`): `effective_target − filtered_humidity` с точностью `0.01%` (`round(2)`), без 1-tick лага при смене уставки.
+4. **Физический 2-DOF PID в `мл/ч` с траекторным упреждением интегратора и Anti-Windup** (`sensor.recommended_intensity` / `sensor.humidity_zap_recommended_intensity`):
+   - Устройства работают в **`mode: "boost"` (`"5"`, программа «Интенсивность», `limits.humidity = 0`)**, а регулятор ведёт расчёт в реальных **`мл/ч`** испарения:
+     $$u_{\text{raw}} = q_{\text{int}} + q_{\text{ff}} + K_p e - K_d \frac{dH}{dt}$$
+     (`Kp = 180 мл/(ч·%)`, `Ki = 9 мл/(ч·%·мин)` [$T_i = 20\text{ мин}$], `Kd = 990 мл/(ч·%/мин)` [$T_d = 5.5\text{ мин}$], $e_{\text{lead}} = e - 14 \cdot \dot{H}$);
+   - **`equilibrium_ml_h` (`q_int`)** — выученный равновесный расход влаги комнаты (`~180–260 мл/ч`, `Level 3–4`), автоматически замораживаемый при пустом/снятом баке, в `Standby` и при упоре выхода в потолок `Q_7` (исключён Integral Windup);
+   - **Прямая компенсация проветривания (`window_ff_ml_h`)**: по положению приводов окон `ventilation` (`cover.drivent_eva_driventokonnyi_privod`, `cover.ventilation_zap_group`) и дефициту абсолютной влажности дом/улица ($\Delta\rho$, г/м³) заранее добавляет до `160 мл/ч` при зимнем открытии окон (летом при $\Delta\rho = 0$ равна `0`);
+   - **Квантователь `мл/ч → ступень 1..7` с адаптивным гистерезисом (`15–22 мл/ч`)**: переводит `u_raw` в откалиброванные ступени `input_text.humidifier_*_consumption_rates`, автоматически схлопывая вырожденные дубли (`|Q_k - Q_{k-1}| < 5 мл/ч`);
+   - **Удержание цели без выключений в `0`**: в штатном зимнем режиме минимальной рабочей ступенью служит `Level 1` (`~69–78 мл/ч`), что сохраняет горячим ТЭН `warm_stream` и исключает `2–6 мин` мёртвой зоны перезапуска. Переход в `0` (`Standby`) происходит только при резком снижении уставки (`error <= -1.2%`) либо если даже на `Level 1` влажность держится выше цели (`error <= -0.45%`, `dH/dt > -0.015 %/мин`) 3 минуты подряд.
+5. **Фактический выход и учёт воды (`Effective Intensity`, `water_consumed`, `hours_remaining`)**:
    - `sensor.humidifier_effective_intensity` / `sensor.humidifier_zap_effective_intensity` отражают фактический `number.*_intensity*` (`1..7`, или `0` в `Standby`/ошибке/снятом баке).
    - `water_consumed` и `hours_remaining` считаются по поуровневой таблице ставок `input_text.humidifier_*_consumption_rates` (`1..7`, мл/ч) и калибруются при полном цикле по `level_1..7_hours` (`history_stats`).
 
@@ -93,7 +94,7 @@
 
 ---
 
-## 🔧 Состав пакета (v4.7.0)
+## 🔧 Состав пакета (v4.8.0)
 
 ### Архитектурные гарантии и особенности `polaris-mqtt`
 
@@ -177,4 +178,4 @@
 
 **Devices:** Polaris PUH‑9105 / PUH‑2709 (`eva`, `zap`)  
 **Integration:** `polaris-mqtt` (MQTT)  
-**Version пакета:** 4.7.0
+**Version пакета:** 4.8.0

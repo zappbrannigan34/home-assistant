@@ -70,7 +70,7 @@ home-assistant/
 │   └── HUMIDITY_CHANGELOG.md        # История изменений пакета humidity
 └── packages/
     ├── humidity/
-    │   ├── humidity_control.yaml    # Основной YAML-пакет (v4.7.0)
+    │   ├── humidity_control.yaml    # Основной YAML-пакет (v4.8.0) + custom_templates/humidity.jinja
     │   └── README.md               # Документация пакета
     └── ventilation/
         ├── ventilation_control.yaml # ZAP generation 7 computed range (v2.6.0)
@@ -241,13 +241,13 @@ for e in data['data']['entities']:
 
 ---
 
-## Existing Package: `humidity` (v4.7.0)
+## Existing Package: `humidity` (v4.8.0)
 
 **Devices:** Polaris PUH-9105 / PUH-2709 (MQTT via `polaris-mqtt` integration) — multi-room `eva` (`*_humidifier`, `devtype 70`, `MCU 1.0.9`) + `zap` (`*_humidifier_2`, `devtype 17`, `MCU 1.0.3`), area-driven via `area_devices('eva')` / `area_devices('zap')`.
 
-100% HA-управляемый PI+D-регулятор (`0..7`, с гистерезисом ON/OFF) в ручном режиме интенсивности `mode: "boost"` (`"5"`, встроенный гигростат и авто-режимы отключены) для удержания целевой влажности по комнатам и `area_devices`. Включает:
+100% HA-управляемый 2-DOF PID-регулятор в физических `мл/ч` (`custom_templates/humidity.jinja`, минутный такт `/1`, квантование в `1..7`, удержание цели без выключений в `0`) в ручном режиме интенсивности `mode: "boost"` (`"5"`, встроенный гигростат и авто-режимы отключены) для удержания целевой влажности по комнатам и `area_devices`. Включает:
 
-- Независимые контуры для комнат **`eva`** (legacy entity IDs сохранены) и **`zap`** (`*_zap_*`) со сглаживанием сигнала влажности (`platform: filter` `lowpass` τ≈3 мин + `platform: derivative` 5 мин: `sensor.humidity_filtered`, `sensor.humidity_zap_filtered`)
+- Независимые контуры для комнат **`eva`** (legacy entity IDs сохранены) и **`zap`** (`*_zap_*`) с быстрым подавлением шума без фазовой слепоты (`platform: filter` `lowpass` `time_constant: 4`, τ≈43 с + `platform: derivative` 3 мин + 3-мин МНК по измерению) и единым шаблоном `custom_templates/humidity.jinja` (`calc_humidity_pid`, `controller_generation: 1`)
 - Однописательную архитектуру (`mode: queued` в `humidity_*_control_main`, триггер по `to: ["0".."7"]`): `humidity_*_mode_enforcer` отслеживает дрейф `mode` (`boost`), `intensity` (`32s`), `warm_stream`/`ioniser`/`child_lock: on`/`backlight: on`/`sound: on`/питания (только при `humidifier == 'on'`, с защитой на время пробы заправки) и лишь триггерит `control_main` (`skip_condition: false`), исключая гонки при выключении
 - Переиспользуемые area-driven скрипты (`script.humidity_setup_area_devices`, `script.humidity_enforce_area_mode`, `script.humidity_apply_area_control`) — управляют всеми `humidifier.*` устройствами в `area_devices(area_name)` независимо:
   - при `recommended == 0` или блокировке (`needs_refill`/`water_tank`/ошибка) выключают `power_ent` (`switch.turn_off` с `wait_template` и повтором), выключая `aux_off` только если нет аварии (`not has_fault_or_empty`), и соблюдают **100% радиотишину (`0` MQTT-команд)** в `Standby` (`mode == 0`) и при ошибках/снятом баке;
@@ -260,7 +260,7 @@ for e in data['data']['entities']:
   - **Баг `polaris/switch.py:850` для `mode = "6"`/`"7"`:** проверка `payload in ("1","01","2","3","4","5","true")` распознаёт `"5"` (`boost`), но пропускает `"6"`/`"7"`; `humidifier.py:207` присваивает `self._attr_is_on = "0"` (truthy строка), поэтому для выключения используется **только** `switch.turn_off(power_ent)`
   - **Переходный пакет и `low_water`:** перед `state/mode = "0"` (~270 мс) прошивка кратковременно шлёт `mode: boost`, `humidity: 30` и сбрасывает `warm_stream`, а при `low_water` сбрасывает `child_lock → off` (иногда за 10–65 мс до `error/code = 01`). Отправка любых команд в `Standby` (`mode = 0`) или при `low_water` будит/подвешивает MCU (`child_lock ↔ low_water` шторм), поэтому в `Standby`/ошибках команды строго запрещены
   - **Wi-Fi MAC (U/L-бит) и баг `unique_id` в `polaris-mqtt v1.1.6`:** Wi-Fi STA MAC отличается от MQTT ID инверсией U/L-бита: `eva` `78:1c:3c:87:32:96` → STA `7a:1c:3c:87:32:96` (`192.168.88.105`), `zap` `98:f4:ab:da:17:83` → STA `9a:f4:ab:da:17:83` (`192.168.88.203`). В `v1.1.6` (`const.py:186`) модель сменилась с `PUH-9105/PUH-2709` на `PUH-9105_PUH-2709`, из-за чего старый `ConfigEntry` `eva` вызывал дублирующий MQTT discovery (`confirm`). Локально пропатчены `custom_components/polaris/__init__.py` (автомиграция `unique_id`) и `config_flow.py` (abort по `entry.data["DEVICEID"]`)
-- Предиктивный ON/OFF-закон с гистерезисом по 5-минутному прогнозу (`predicted_error = error - rate * 5`): при `prev_demand = false` включение (`100%`) при `error >= +0.30%` или (`error >= +0.10%` и `predicted_error >= +0.50%`); при `prev_demand = true` выключение (`0%`) при `error <= -0.35%` или (`error <= 0.0%` и `predicted_error <= -0.35%`)
+- Физический 2-DOF PID в `мл/ч` (`Kp=180, Ki=9, Kd=990`, упреждающий вход интегратора $e_{\text{lead}} = e - 14\dot{H}$, жёсткий Anti-Windup, гистерезисный квантователь `15–22 мл/ч` по `consumption_rates` со схлопыванием дублей `< 5 мл/ч` и прямой компенсацией `window_ff_ml_h` от приводов окон `ventilation`): удерживает равновесие на `Level 1..7` с горячим `warm_stream` без релейных отсечек в `0` (переход в `0` только при `error <= -1.2%` или избытке на `Level 1` 3 мин подряд)
 - Защищённый от конденсата (`15–50 мл` со стенок бака и фильтра) контур заправки и калибровки (`v4.7.0`, без `periodic_probe`): при `tank_replaced` (`water_tank: on → off`, `>= 10 с`, с отсечкой дребезга `tank_replaced_fails < 2` и сохранением цикла при коротком осмотре `10–34 с`), кнопке `ON` на корпусе, `/refill_*` или UI-тумблере включается неразрушающая стадия `refill_pending` (`warm_stream: off`, без сброса `water_consumed`/`cycle_start` и без `"✅"`), а фиксация цикла задним числом с уже учтёнными `~120 мл` (`humidity_refill_verified_commit`) происходит только после фактического испарения `>= 120 мл` воды; при `low_water` двухступенчатый импульсный классификатор (`wait 2s + 10s` на `state/error/water`: `< 10 с` авто-сброс = сухой бак на базе, `>= 10 с` = снятие бака руками) исключает ложную калибровку и спам `"💧 Мало воды"`, а `history_stats` `level_1..7_hours` считают реальную наработку по `sensor.humidifier_*_effective_intensity` с взвешенной монотонной калибровкой (`3600..7500 мл`, `cycles + 1`)
 - Уведомления через `packages/notifications` (`script.notify_dispatch` / `script.notify_clear`): предупреждение `<= 15%` (`humidity_water_low_warning`), ошибки устройств, подтверждение заправки и `humidity_device_offline_watchdog` (`available == 'off'` на `10m` → `p2_maintenance`, возврат после `>= 600s` → `notify_clear`)
 - **Безусловный приоритет CO₂ (`ventilation`) над `humidity`:** пакет влажности никогда не закрывает и не зажимает оконные приводы `Drivent`; вентиляция по CO₂ работает полностью независимо

@@ -1,0 +1,404 @@
+{%- set ROOMS = {
+  'eva': {
+    'area': 'eva',
+    'rec_entity': 'sensor.recommended_intensity',
+    'raw_hum': 'sensor.sensor_eva_humidity',
+    'filt_hum': 'sensor.humidity_filtered',
+    'room_temp': 'sensor.sensor_eva_temperature',
+    'adaptive_bool': 'input_boolean.humidity_adaptive_target',
+    'manual_target': 'input_number.humidity_target',
+    'rates_text': 'input_text.humidifier_consumption_rates',
+    'needs_refill': 'input_boolean.humidifier_needs_refill',
+    'refill_pending': 'input_boolean.humidifier_refill_pending',
+    'tank_latch': 'input_boolean.humidifier_tank_removed_latch',
+    'ctrl_auto': 'automation.humidity_control_main',
+    'cover': 'cover.drivent_eva_driventokonnyi_privod',
+    'weather': 'weather.forecast_home_assistant'
+  },
+  'zap': {
+    'area': 'zap',
+    'rec_entity': 'sensor.humidity_zap_recommended_intensity',
+    'raw_hum': 'sensor.sensor_zap_humidity',
+    'filt_hum': 'sensor.humidity_zap_filtered',
+    'room_temp': 'sensor.sensor_zap_temperature',
+    'adaptive_bool': 'input_boolean.humidity_zap_adaptive_target',
+    'manual_target': 'input_number.humidity_zap_target',
+    'rates_text': 'input_text.humidifier_zap_consumption_rates',
+    'needs_refill': 'input_boolean.humidifier_zap_needs_refill',
+    'refill_pending': 'input_boolean.humidifier_zap_refill_pending',
+    'tank_latch': 'input_boolean.humidifier_zap_tank_removed_latch',
+    'ctrl_auto': 'automation.humidity_zap_control_main',
+    'cover': 'cover.ventilation_zap_group',
+    'weather': 'weather.forecast_home_assistant'
+  }
+} -%}
+
+{%- set ALLOWED_ERRORS = [
+  '00', 'no_error',
+  '02', 'child_lock',
+  '03', 'replace_filter',
+  '04', 'maximum_schedules',
+  '05', 'clean_tank',
+  '', 'unknown', 'unavailable'
+] -%}
+
+{%- set DEFAULT_RATES = {
+  '1': 150.0, '2': 205.0, '3': 260.0, '4': 315.0,
+  '5': 370.0, '6': 425.0, '7': 480.0
+} -%}
+
+{%- macro calc_humidity_pid(room, trig_id='tick') -%}
+  {%- set cfg = ROOMS.get(room, ROOMS['eva']) -%}
+  {%- set tid = (trig_id | default('tick', true) | string) -%}
+  {%- set is_tick = (tid == 'tick') -%}
+  {%- set st = states[cfg.rec_entity] -%}
+  {%- set p = st.attributes if (st is not none and st.attributes is mapping) else {} -%}
+  {%- set prev_gen = p.get('controller_generation') | int(0) -%}
+  {%- set is_migrating = (prev_gen != 1) -%}
+
+  {# 1. Действующая целевая влажность (inline без 1-tick лага при вводе с дашборда) #}
+  {%- set adaptive_on = is_state(cfg.adaptive_bool, 'on') -%}
+  {%- set has_temp = has_value(cfg.room_temp) -%}
+  {%- set has_target = has_value(cfg.manual_target) or (adaptive_on and has_temp) -%}
+  {%- if adaptive_on and has_temp -%}
+    {%- set t_room_sp = states(cfg.room_temp) | float(22.0) -%}
+    {%- set target = [[(75.0 - 1.25 * t_room_sp), 60.0] | min, 35.0] | max -%}
+  {%- else -%}
+    {%- set target = states(cfg.manual_target) | float(40.0) -%}
+  {%- endif -%}
+
+  {# 2. Текущая сглаженная влажность (lowpass tc=4, ~43с) и 3-мин наклон МНК по измерению #}
+  {%- set has_hum_sig = has_value(cfg.filt_hum) or has_value(cfg.raw_hum) -%}
+  {%- set raw_h = states(cfg.raw_hum) | float(target) if has_value(cfg.raw_hum) else (states(cfg.filt_hum) | float(target)) -%}
+  {%- set filt_h = states(cfg.filt_hum) | float(raw_h) if has_value(cfg.filt_hum) else raw_h -%}
+
+  {%- set prev_h0 = filt_h if (is_migrating or not is_number(p.get('h0'))) else (p.get('h0') | float(filt_h)) -%}
+  {%- set prev_h1 = prev_h0 if (is_migrating or not is_number(p.get('h1'))) else (p.get('h1') | float(prev_h0)) -%}
+  {%- set prev_h2 = prev_h1 if (is_migrating or not is_number(p.get('h2'))) else (p.get('h2') | float(prev_h1)) -%}
+  {%- set prev_h3 = prev_h2 if (is_migrating or not is_number(p.get('h3'))) else (p.get('h3') | float(prev_h2)) -%}
+
+  {%- if is_migrating -%}
+    {%- set h0 = filt_h -%}
+    {%- set h1 = filt_h -%}
+    {%- set h2 = filt_h -%}
+    {%- set h3 = filt_h -%}
+  {%- elif is_tick -%}
+    {%- set h0 = filt_h -%}
+    {%- set h1 = prev_h0 -%}
+    {%- set h2 = prev_h1 -%}
+    {%- set h3 = prev_h2 -%}
+  {%- else -%}
+    {%- set h0 = filt_h -%}
+    {%- set h1 = prev_h1 -%}
+    {%- set h2 = prev_h2 -%}
+    {%- set h3 = prev_h3 -%}
+  {%- endif -%}
+
+  {%- set raw_rate = (3.0 * h0 + h1 - h2 - 3.0 * h3) / 10.0 -%}
+  {%- set rate = [[raw_rate, -0.25] | max, 0.25] | min -%}
+  {%- set error = target - filt_h -%}
+  {%- set predicted_error = error - (5.0 * rate) -%}
+
+  {# 3. Опрос увлажнителей в комнате (area_devices) #}
+  {%- set nr_on = is_state(cfg.needs_refill, 'on') -%}
+  {%- set pending_on = is_state(cfg.refill_pending, 'on') -%}
+  {%- set latch_on = is_state(cfg.tank_latch, 'on') -%}
+  {%- set auto_on = is_state(cfg.ctrl_auto, 'on') -%}
+  {%- set ns_dev = namespace(dev_count=0, active_count=0, active_max=0, has_hum=false, any_can_run=false) -%}
+  {%- for dev in area_devices(cfg.area) -%}
+    {%- set ents = device_entities(dev) -%}
+    {%- set hum = ents | select('match', '^humidifier\\.') | first | default('') -%}
+    {%- if hum != '' -%}
+      {%- set ns_dev.dev_count = ns_dev.dev_count + 1 -%}
+      {%- set pwr = ents | select('match', '^switch\\..*_power(_\\d+)?$') | first | default('') -%}
+      {%- set int_ent = ents | select('match', '^number\\..*_intensity(_\\d+)?$') | first | default('') -%}
+      {%- set err_ent = ents | select('match', '^sensor\\..*_error(_\\d+)?$') | first | default('') -%}
+      {%- set tank_ent = ents | select('match', '^binary_sensor\\..*_water_tank(_\\d+)?$') | first | default('') -%}
+      {%- if states(hum) not in ['unavailable', 'unknown'] and int_ent != '' and has_value(int_ent) -%}
+        {%- set ns_dev.has_hum = true -%}
+      {%- endif -%}
+      {%- set is_on = is_state(hum, 'on') or (pwr != '' and is_state(pwr, 'on')) -%}
+      {%- if is_on -%}
+        {%- set ns_dev.active_count = ns_dev.active_count + 1 -%}
+        {%- set val = states(int_ent) | int(0) if (int_ent != '' and has_value(int_ent)) else 0 -%}
+        {%- if val > ns_dev.active_max -%}
+          {%- set ns_dev.active_max = val -%}
+        {%- endif -%}
+      {%- endif -%}
+      {%- set dev_ok = states(hum) not in ['unavailable', 'unknown']
+                       and (err_ent == '' or states(err_ent) in ALLOWED_ERRORS)
+                       and (tank_ent == '' or not is_state(tank_ent, 'on'))
+                       and not latch_on
+                       and (not nr_on or pending_on) -%}
+      {%- if dev_ok -%}
+        {%- set ns_dev.any_can_run = true -%}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+
+  {%- set now_ts = as_timestamp(now()) -%}
+  {%- set prev_ts_raw = p.get('last_update_ts') -%}
+  {%- set has_prev_ts = (not is_migrating) and is_number(prev_ts_raw) -%}
+  {%- set prev_ts = (prev_ts_raw | float(now_ts - 60.0)) if has_prev_ts else (now_ts - 60.0) -%}
+  {%- set avail_raw = has_hum_sig and has_target and ns_dev.has_hum -%}
+  {%- set grace_hold = (not avail_raw) and (not is_migrating) and has_prev_ts and ((now_ts - prev_ts) < 180.0) -%}
+  {%- set avail = avail_raw or grace_hold -%}
+  {%- set can_run = auto_on and ns_dev.any_can_run and avail_raw -%}
+
+  {# 4. Таблица откалиброванных расходов Q_1..Q_7 (мл/ч) и монотонная лестница без слипшихся ступеней #}
+  {%- set rates_raw = states(cfg.rates_text) -%}
+  {%- set r_parsed = (rates_raw | from_json(default=DEFAULT_RATES)) if (rates_raw not in ['unknown', 'unavailable', '']) else DEFAULT_RATES -%}
+  {%- set r_map = r_parsed if (r_parsed is mapping) else DEFAULT_RATES -%}
+  {%- set ns_r = namespace(q=[], prev=10.0, ladder=[]) -%}
+  {%- for k in ['1', '2', '3', '4', '5', '6', '7'] -%}
+    {%- set v = r_map.get(k, DEFAULT_RATES[k]) | float(DEFAULT_RATES[k]) -%}
+    {%- set v_mon = [v, ns_r.prev] | max -%}
+    {%- set ns_r.prev = v_mon -%}
+    {%- set ns_r.q = ns_r.q + [v_mon] -%}
+  {%- endfor -%}
+  {%- set q1 = ns_r.q[0] -%}
+  {%- set q7 = ns_r.q[6] -%}
+
+  {%- set ns_r.ladder = [{'lvl': 1, 'q': q1}] -%}
+  {%- for idx in [1, 2, 3, 4, 5, 6] -%}
+    {%- set k_lvl = idx + 1 -%}
+    {%- set q_k = ns_r.q[idx] -%}
+    {%- set last_item = ns_r.ladder[-1] -%}
+    {%- if (q_k - last_item.q) >= 5.0 -%}
+      {%- set ns_r.ladder = ns_r.ladder + [{'lvl': k_lvl, 'q': q_k}] -%}
+    {%- elif k_lvl == 7 -%}
+      {%- set ns_r.ladder = ns_r.ladder[:-1] + [{'lvl': 7, 'q': q_k}] -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- set ladder = ns_r.ladder -%}
+  {%- set ladder_len = ladder | count -%}
+
+  {# 5. Прямая компенсация (Feedforward, мл/ч) от открытия окон пакета ventilation #}
+  {%- set cover_ok = states(cfg.cover) not in ['unavailable', 'unknown', ''] -%}
+  {%- set cover_pos = (state_attr(cfg.cover, 'current_position') | float(0.0)) if cover_ok else 0.0 -%}
+  {%- set cover_frac = [[cover_pos / 100.0, 0.0] | max, 1.0] | min -%}
+  {%- set t_out_raw = state_attr(cfg.weather, 'temperature') -%}
+  {%- if cover_frac > 0.0 and has_temp and t_out_raw is not none and is_number(t_out_raw) -%}
+    {%- set t_in = [[states(cfg.room_temp) | float(22.0), 5.0] | max, 40.0] | min -%}
+    {%- set t_out = [[t_out_raw | float(0.0), -40.0] | max, 45.0] | min -%}
+    {%- set rh_out_raw = state_attr(cfg.weather, 'humidity') -%}
+    {%- set rh_out = [[(rh_out_raw | float(80.0)) if (rh_out_raw is not none and is_number(rh_out_raw)) else 80.0, 10.0] | max, 100.0] | min -%}
+    {%- set es_in = 6.112 * (2.718281828459045 ** ((17.67 * t_in) / (t_in + 243.5))) -%}
+    {%- set es_out = 6.112 * (2.718281828459045 ** ((17.67 * t_out) / (t_out + 243.5))) -%}
+    {%- set rho_in = (es_in * filt_h * 2.1674) / (t_in + 273.15) -%}
+    {%- set rho_out = (es_out * rh_out * 2.1674) / (t_out + 273.15) -%}
+    {%- set delta_rho = [rho_in - rho_out, 0.0] | max -%}
+    {%- set q_ff = [[70.0 * cover_frac * delta_rho, 0.0] | max, 160.0] | min -%}
+  {%- else -%}
+    {%- set delta_rho = 0.0 -%}
+    {%- set q_ff = 0.0 -%}
+  {%- endif -%}
+
+  {# 6. 2-DOF PID в физических мл/ч с траекторным упреждением интегратора и честным Anti-Windup #}
+  {%- set KP = 180.0 -%}
+  {%- set KI = 9.0 -%}
+  {%- set KD = 990.0 -%}
+  {%- set T_LEAD = 14.0 -%}
+
+  {%- set dt = [[(now_ts - prev_ts) / 60.0, 0.5] | max, 2.0] | min if (is_tick and not is_migrating and not grace_hold) else 0.0 -%}
+
+  {%- set has_prev_rec = (not is_migrating) and (st is not none) and (st.state not in ['unknown', 'unavailable', '']) -%}
+  {%- set prev_rec_state = (st.state | int(0)) if has_prev_rec else ns_dev.active_max -%}
+  {%- set was_on = (can_run and prev_rec_state > 0) if has_prev_rec else (ns_dev.active_count > 0) -%}
+
+  {%- set default_q_int = [[0.48 * q7, q1] | max, 260.0] | min -%}
+  {%- set q_int_prev = default_q_int if (is_migrating or not is_number(p.get('equilibrium_ml_h'))) else (p.get('equilibrium_ml_h') | float(default_q_int)) -%}
+  {%- set q_int_max = q7 -%}
+
+  {%- set p_term = KP * error -%}
+  {%- set d_term = 0.0 - (KD * rate) -%}
+  {%- set u_pre = q_int_prev + q_ff + p_term + d_term -%}
+  {%- set e_lead = error - (T_LEAD * rate) -%}
+  {%- set e_int = 0.0 if (e_lead | abs) <= 0.04 else e_lead -%}
+
+  {%- if grace_hold -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'sensor_grace_hold' -%}
+  {%- elif is_migrating -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'migration_init' -%}
+  {%- elif not can_run -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'frozen_device_blocked' -%}
+  {%- elif not was_on -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'frozen_standby' -%}
+  {%- elif error <= -1.20 -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'frozen_fast_shutoff' -%}
+  {%- elif dt <= 0.0 -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'event_hold' -%}
+  {%- elif e_int == 0.0 -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'equilibrium_deadband' -%}
+  {%- elif e_int > 0.0 and u_pre >= q7 -%}
+    {%- set q_int = [[q_int_prev, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'clamped_upper_saturation' -%}
+  {%- elif e_int < 0.0 and u_pre <= 0.0 and q_int_prev <= 0.0 -%}
+    {%- set q_int = 0.0 -%}
+    {%- set aw_state = 'clamped_zero_floor' -%}
+  {%- else -%}
+    {%- set dq_int = [[KI * e_int * dt, -12.0 * dt] | max, 15.0 * dt] | min -%}
+    {%- set q_int = [[q_int_prev + dq_int, 0.0] | max, q_int_max] | min -%}
+    {%- set aw_state = 'integrating' -%}
+  {%- endif -%}
+
+  {%- set u_raw = q_int + q_ff + p_term + d_term -%}
+
+  {# 7. Гистерезисное квантование мл/ч -> ступень 1..7 #}
+  {%- set ns_q = namespace(near_idx=0, near_err=999999.0, cur_idx=0, cur_err=999999.0, idx=0) -%}
+  {%- set cur_lvl_ref = prev_rec_state if (has_prev_rec and prev_rec_state > 0) else ([ns_dev.active_max, 1] | max) -%}
+  {%- set cur_q_ref = ns_r.q[[[cur_lvl_ref - 1, 0] | max, 6] | min] -%}
+  {%- for i in range(ladder_len) -%}
+    {%- set d_near = (u_raw - ladder[i].q) | abs -%}
+    {%- if d_near <= ns_q.near_err -%}
+      {%- set ns_q.near_err = d_near -%}
+      {%- set ns_q.near_idx = i -%}
+    {%- endif -%}
+    {%- set d_cur = (cur_q_ref - ladder[i].q) | abs -%}
+    {%- if ladder[i].lvl == cur_lvl_ref -%}
+      {%- set ns_q.cur_err = -1.0 -%}
+      {%- set ns_q.cur_idx = i -%}
+    {%- elif ns_q.cur_err >= 0.0 and d_cur <= ns_q.cur_err -%}
+      {%- set ns_q.cur_err = d_cur -%}
+      {%- set ns_q.cur_idx = i -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- if u_raw >= (q7 - 1.0) -%}
+    {%- set ns_q.near_idx = ladder_len - 1 -%}
+  {%- endif -%}
+
+  {%- if was_on -%}
+    {%- set ns_q.idx = ns_q.cur_idx -%}
+    {%- for _ in range(ladder_len) -%}
+      {%- if ns_q.idx < (ladder_len - 1) -%}
+        {%- set q_lo = ladder[ns_q.idx].q -%}
+        {%- set q_hi = ladder[ns_q.idx + 1].q -%}
+        {%- set h_up = [[0.22 * (q_hi - q_lo), 15.0] | max, 22.0] | min -%}
+        {%- set thr_up = [0.5 * (q_lo + q_hi) + h_up, q_hi - 2.0] | min -%}
+        {%- if u_raw >= thr_up -%}
+          {%- set ns_q.idx = ns_q.idx + 1 -%}
+        {%- endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {%- for _ in range(ladder_len) -%}
+      {%- if ns_q.idx > 0 -%}
+        {%- set q_hi = ladder[ns_q.idx].q -%}
+        {%- set q_lo = ladder[ns_q.idx - 1].q -%}
+        {%- set h_dn = [[0.22 * (q_hi - q_lo), 15.0] | max, 22.0] | min -%}
+        {%- set thr_dn = [0.5 * (q_lo + q_hi) - h_dn, q_lo + 2.0] | max -%}
+        {%- if u_raw <= thr_dn -%}
+          {%- set ns_q.idx = ns_q.idx - 1 -%}
+        {%- endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {%- set quant_lvl = ladder[ns_q.idx].lvl -%}
+  {%- else -%}
+    {%- set quant_lvl = ladder[ns_q.near_idx].lvl -%}
+  {%- endif -%}
+
+  {# 8. Управление нижней границей Level 1 <-> Level 0 (выкл ТОЛЬКО при реальном избытке даже на Level 1) #}
+  {%- set prev_l1_mins = 0.0 if (is_migrating or not is_number(p.get('l1_overshoot_minutes'))) else (p.get('l1_overshoot_minutes') | float(0.0)) -%}
+
+  {%- if grace_hold -%}
+    {%- set rec_lvl = prev_rec_state -%}
+    {%- set l1_mins = prev_l1_mins -%}
+    {%- set mode_str = p.get('control_mode', 'sensor_grace_hold') | string -%}
+    {%- set out_h0 = prev_h0 -%}
+    {%- set out_h1 = prev_h1 -%}
+    {%- set out_h2 = prev_h2 -%}
+    {%- set out_h3 = prev_h3 -%}
+    {%- set next_ts = prev_ts -%}
+  {%- elif not was_on -%}
+    {%- set wake_demand = (error >= 0.30)
+                          or (error >= 0.12 and (error - 4.0 * rate) >= 0.32)
+                          or (pending_on and error > -0.35) -%}
+    {%- if wake_demand -%}
+      {%- set rec_lvl = [quant_lvl, 1] | max -%}
+      {%- set l1_mins = 0.0 -%}
+      {%- set mode_str = 'recovering_max' if (rec_lvl == 7 and error > 1.2) else 'modulating' -%}
+    {%- else -%}
+      {%- set rec_lvl = 0 -%}
+      {%- set l1_mins = 0.0 -%}
+      {%- set mode_str = 'standby_at_target' -%}
+    {%- endif -%}
+    {%- set out_h0 = h0 -%}
+    {%- set out_h1 = h1 -%}
+    {%- set out_h2 = h2 -%}
+    {%- set out_h3 = h3 -%}
+    {%- set next_ts = now_ts if (is_tick or is_migrating) else prev_ts -%}
+  {%- else -%}
+    {%- if error <= -1.20 -%}
+      {%- set rec_lvl = 0 -%}
+      {%- set l1_mins = 0.0 -%}
+      {%- set mode_str = 'standby_fast_overshoot' -%}
+    {%- elif quant_lvl == 1 and u_raw <= (0.65 * q1) and error <= -0.45 and rate > -0.015 -%}
+      {%- set next_l1_mins = prev_l1_mins + (dt if is_tick else 0.0) -%}
+      {%- if next_l1_mins >= 3.0 -%}
+        {%- set rec_lvl = 0 -%}
+        {%- set l1_mins = 0.0 -%}
+        {%- set mode_str = 'standby_l1_excess' -%}
+      {%- else -%}
+        {%- set rec_lvl = 1 -%}
+        {%- set l1_mins = next_l1_mins -%}
+        {%- set mode_str = 'holding_min_l1' -%}
+      {%- endif -%}
+    {%- else -%}
+      {%- set rec_lvl = [quant_lvl, 1] | max -%}
+      {%- set l1_mins = 0.0 -%}
+      {%- if rec_lvl == 7 and error > 1.2 -%}
+        {%- set mode_str = 'recovering_max' -%}
+      {%- elif (error | abs) <= 0.25 and (rate | abs) <= 0.04 -%}
+        {%- set mode_str = 'holding_equilibrium' -%}
+      {%- else -%}
+        {%- set mode_str = 'modulating' -%}
+      {%- endif -%}
+    {%- endif -%}
+    {%- set out_h0 = h0 -%}
+    {%- set out_h1 = h1 -%}
+    {%- set out_h2 = h2 -%}
+    {%- set out_h3 = h3 -%}
+    {%- set next_ts = now_ts if (is_tick or is_migrating) else prev_ts -%}
+  {%- endif -%}
+
+  {{- {
+    'available': avail,
+    'state': rec_lvl | int,
+    'attributes': {
+      'controller_version': '4.8.0',
+      'controller_generation': 1,
+      'area_id': cfg.area,
+      'device_count': ns_dev.dev_count | int,
+      'active_devices': ns_dev.active_count | int,
+      'raw_humidity': raw_h | round(2),
+      'filtered_humidity': filt_h | round(2),
+      'target_humidity': target | round(1),
+      'error': error | round(2),
+      'rate': rate | round(4),
+      'predicted_error': predicted_error | round(2),
+      'equilibrium_ml_h': q_int | round(1),
+      'demand_ml_h': u_raw | round(1),
+      'p_ml_h': p_term | round(1),
+      'd_ml_h': d_term | round(1),
+      'window_ff_ml_h': q_ff | round(1),
+      'window_cover_pct': cover_pos | round(0) | int,
+      'vapor_deficit_g_m3': delta_rho | round(2),
+      'anti_windup_state': aw_state,
+      'control_mode': mode_str,
+      'l1_overshoot_minutes': l1_mins | round(2),
+      'overshoot': error < -0.5,
+      'overshoot_pct': ([0.0, 0.0 - error] | max) | round(2),
+      'h0': out_h0 | round(3),
+      'h1': out_h1 | round(3),
+      'h2': out_h2 | round(3),
+      'h3': out_h3 | round(3),
+      'last_update_ts': next_ts | round(3)
+    }
+  } | to_json -}}
+{%- endmacro -%}

@@ -1,7 +1,7 @@
 # package: puh_9105_humidity_multiroom
-# Version: 4.7.0
-# Last Updated: 2026-11-26
-# Changes: Condensate-proof volume-verified refill (>= 120 ml), delete periodic_probe, 10s pulse-width low_water classifier, effective_intensity history_stats
+# Version: 4.8.0
+# Last Updated: 2026-11-27
+# Changes: True 2-DOF PID in physical ml/h (custom_templates/humidity.jinja), anti-windup, lowpass(4), 3m OLS derivative, window FF, hold Level 1..7 without bang-bang shutoff
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  INPUT BOOLEANS (целевой режим + стейт-машина заправки с защитой от конденсата)
@@ -356,8 +356,8 @@ sensor:
     end: "{{ now() }}"
 
   # ──────────────────────────────────────────────────────────────────────────
-  #  FILTER & DERIVATIVE SENSORS (сглаживание сигнала влажности по аналогии с CO2)
-  #  WirenBoard обновляет влажность каждые ~10.5 с → lowpass time_constant: 18 (~3 мин)
+  #  FILTER & DERIVATIVE SENSORS (быстрое подавление шума без фазовой слепоты)
+  #  WirenBoard обновляет влажность каждые ~10.8 с → lowpass time_constant: 4 (~43 с вместо 5 мин)
   # ──────────────────────────────────────────────────────────────────────────
   # Eva (legacy room)
   - platform: filter
@@ -366,7 +366,7 @@ sensor:
     entity_id: sensor.sensor_eva_humidity
     filters:
       - filter: lowpass
-        time_constant: 18
+        time_constant: 4
         precision: 2
 
   - platform: derivative
@@ -375,7 +375,7 @@ sensor:
     unique_id: humidity_slope
     round: 3
     unit_time: min
-    time_window: "00:05:00"
+    time_window: "00:03:00"
 
   # Zap
   - platform: filter
@@ -384,7 +384,7 @@ sensor:
     entity_id: sensor.sensor_zap_humidity
     filters:
       - filter: lowpass
-        time_constant: 18
+        time_constant: 4
         precision: 2
 
   - platform: derivative
@@ -393,7 +393,7 @@ sensor:
     unique_id: humidity_zap_slope
     round: 3
     unit_time: min
-    time_window: "00:05:00"
+    time_window: "00:03:00"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  TEMPLATE SENSORS
@@ -401,13 +401,15 @@ sensor:
 
 template:
   # ════════════════════════════════════════════════════════════════════════════
-  #  EVA — БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ
+  #  EVA — БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ (3-мин МНК по измерению)
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
+        id: "tick"
       - platform: homeassistant
         event: start
+        id: "startup"
     sensor:
       - name: "Humidity Rate"
         unique_id: humidity_rate
@@ -415,31 +417,52 @@ template:
         state_class: measurement
         icon: mdi:trending-up
         state: >
-          {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
+          {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
           {% set current = (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(none) %}
-          {% set prev_rate = (this.state if (this is defined and this.state is defined) else 0) | float(0) %}
+          {% set prev_rate = (this.state if (this is defined and this.state is defined and is_number(this.state)) else 0) | float(0) %}
           {% if current is none %}
             {{ prev_rate }}
           {% else %}
-            {# Берём значение 5 минут назад (5 шагов × 1 мин) #}
-            {% set old = attrs.get('h5', current) | float(current) %}
-            {% set rate = (current - old) / 5 %}
-            {# EMA сглаживание для уменьшения шума #}
-            {{ (0.4 * rate + 0.6 * prev_rate) | round(3) }}
+            {% set is_tick = (trigger is defined and trigger.id == 'tick') %}
+            {% set p0 = attrs.get('h0', current) | float(current) %}
+            {% set p1 = attrs.get('h1', p0) | float(p0) %}
+            {% set p2 = attrs.get('h2', p1) | float(p1) %}
+            {% set p3 = attrs.get('h3', p2) | float(p2) %}
+            {% set h0 = current %}
+            {% set h1 = p0 if is_tick else p1 %}
+            {% set h2 = p1 if is_tick else p2 %}
+            {% set h3 = p2 if is_tick else p3 %}
+            {{ ((3.0 * h0 + h1 - h2 - 3.0 * h3) / 10.0) | round(4) }}
           {% endif %}
         attributes:
-          # Кольцевой буфер: каждую 1 мин сдвигаем историю по сглаженному сигналу
-          h1: "{{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) }}"
-          h2: "{{ (this.attributes.get('h1') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity'), true) | float(0) }}"
-          h3: "{{ (this.attributes.get('h2') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity'), true) | float(0) }}"
-          h4: "{{ (this.attributes.get('h3') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity'), true) | float(0) }}"
-          h5: "{{ (this.attributes.get('h4') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity'), true) | float(0) }}"
+          h0: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% if has_value('sensor.humidity_filtered') or has_value('sensor.sensor_eva_humidity') %}
+              {{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) | round(3) }}
+            {% else %}
+              {{ attrs.get('h0', 0) | float(0) | round(3) }}
+            {% endif %}
+          h1: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_filtered') or has_value('sensor.sensor_eva_humidity') %}
+            {% set cur = (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) if ok else (attrs.get('h0', 0) | float(0)) %}
+            {{ (attrs.get('h0', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h1', cur)) | float(cur) | round(3) }}
+          h2: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_filtered') or has_value('sensor.sensor_eva_humidity') %}
+            {% set cur = (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) if ok else (attrs.get('h1', 0) | float(0)) %}
+            {{ (attrs.get('h1', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h2', cur)) | float(cur) | round(3) }}
+          h3: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_filtered') or has_value('sensor.sensor_eva_humidity') %}
+            {% set cur = (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) if ok else (attrs.get('h2', 0) | float(0)) %}
+            {{ (attrs.get('h2', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h3', cur)) | float(cur) | round(3) }}
           current_humidity: "{{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) }}"
           raw_humidity: "{{ states('sensor.sensor_eva_humidity') | float(0) | round(2) }}"
           filtered_humidity: "{{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) | round(2) }}"
-          derivative_slope_5m: "{{ states('sensor.humidity_slope') | float(0) | round(3) }}"
-          filter_type: "ema_lowpass"
-          minutes_window: 5
+          derivative_slope_3m: "{{ states('sensor.humidity_slope') | float(0) | round(3) }}"
+          filter_type: "ols_3m_lowpass4"
+          minutes_window: 3
 
   # ════════════════════════════════════════════════════════════════════════════
   #  EVA — БЛОК 2: ЦЕЛЬ И ОШИБКА РЕГУЛИРОВАНИЯ
@@ -492,7 +515,7 @@ template:
             {{ states('input_number.humidity_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.7.0"
+          controller_version: "4.8.0"
           area_id: "eva"
           target_mode: >
             {% if is_state('input_boolean.humidity_adaptive_target', 'on') %}
@@ -541,184 +564,67 @@ template:
         attributes:
           raw_humidity: "{{ states('sensor.sensor_eva_humidity') | float(0) | round(2) }}"
           filtered_humidity: "{{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) | round(2) }}"
-          target_humidity: "{{ states('sensor.target_humidity') | float(35) | round(1) }}"
+          target_humidity: >-
+            {% if is_state('input_boolean.humidity_adaptive_target', 'on') and has_value('sensor.sensor_eva_temperature') %}
+              {{ [[(75 - 1.25 * (states('sensor.sensor_eva_temperature') | float(22))), 60] | min | float, 35] | max | round(1) }}
+            {% else %}
+              {{ states('input_number.humidity_target') | float(35) | round(1) }}
+            {% endif %}
           error_source: "filtered_humidity_error"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  EVA — БЛОК 3: ПЛОТНЫЙ PI+D-РЕГУЛЯТОР (0..7) ПО AREA DEVICES
+  #  EVA — БЛОК 3: 2-DOF PID В ФИЗИЧЕСКИХ МЛ/Ч (custom_templates/humidity.jinja)
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
-      - platform: state
-        entity_id:
-          - sensor.humidity_error
-          - sensor.humidity_rate
-          - humidifier.humidifier_puh_9105_puh_2709_humidifier
-          - number.humidifier_puh_9105_puh_2709_intensity
-          - switch.humidifier_puh_9105_puh_2709_power
-      - platform: homeassistant
-        event: start
       - platform: time_pattern
         minutes: "/1"
+        id: "tick"
+      - platform: state
+        entity_id:
+          - input_number.humidity_target
+          - input_boolean.humidity_adaptive_target
+          - input_boolean.humidifier_refill_pending
+        id: "target_change"
+    variables:
+      pid: >-
+        {% from 'humidity.jinja' import calc_humidity_pid %}
+        {{ calc_humidity_pid('eva', trigger.id if (trigger is defined and trigger.id is defined) else 'tick') | from_json }}
     sensor:
       - name: "Recommended Intensity"
         unique_id: humidity_recommended_intensity
         state_class: measurement
         icon: mdi:gauge
-        availability: >
-          {% set ns = namespace(has_hum=false) %}
-          {% for dev in area_devices('eva') %}
-            {% set ents = device_entities(dev) %}
-            {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-            {% set int_ent = ents | select('match', '^number\\..*_intensity(_\\d+)?$') | first | default('') %}
-            {% if hum != '' and states(hum) not in ['unavailable', 'unknown'] and int_ent != '' and has_value(int_ent) %}
-              {% set ns.has_hum = true %}
-            {% endif %}
-          {% endfor %}
-          {{ has_value('sensor.humidity_error') and
-             has_value('sensor.humidity_rate') and
-             ns.has_hum }}
-        state: >
-          {% set error = states('sensor.humidity_error') | float(0) %}
-          {% set rate = states('sensor.humidity_rate') | float(0) %}
-          {% set ns_dev = namespace(active_max=0, has_on=false) %}
-          {% for dev in area_devices('eva') %}
-            {% set ents = device_entities(dev) %}
-            {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-            {% if hum != '' %}
-              {% set pwr = ents | select('match', '^switch\\..*_power(_\\d+)?$') | first | default('') %}
-              {% set int_ent = ents | select('match', '^number\\..*_intensity(_\\d+)?$') | first | default('') %}
-              {% set is_on = is_state(hum, 'on') or (pwr != '' and is_state(pwr, 'on')) %}
-              {% if is_on %}
-                {% set ns_dev.has_on = true %}
-                {% if int_ent != '' and has_value(int_ent) %}
-                  {% set val = states(int_ent) | int(0) %}
-                  {% if val > ns_dev.active_max %}
-                    {% set ns_dev.active_max = val %}
-                  {% endif %}
-                {% endif %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-          {% set current = ns_dev.active_max if ns_dev.has_on else 0 %}
-          {% set prev_rec = (this.state | int(0)) if (this is defined and this.state is defined and this.state not in ['unknown', 'unavailable']) else current %}
-          {% set prev_active = (prev_rec > 0) or ns_dev.has_on %}
-
-          {% set PREDICTION_MINUTES = 5 %}
-          {% set predicted_error = error - (rate * PREDICTION_MINUTES) %}
-          {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
-          {% set prev_int = attrs.get('integral_level', 0.0) | float(0.0) %}
-          {% set now_ts = as_timestamp(now()) %}
-          {% set prev_ts = attrs.get('last_int_ts', now_ts - 60) | float(now_ts - 60) %}
-          {% set dt = [[(now_ts - prev_ts) / 60.0, 0.0] | max, 2.0] | min %}
-
-          {% if error > 0.3 %}
-            {% set base_int = [prev_int, (1.0 if error > 0.5 else 0.0)] | max %}
-            {% set integral_level = [[base_int + (0.30 * error * dt), 0.0] | max, 7.0] | min %}
-          {% elif error <= -0.35 %}
-            {% set integral_level = [[prev_int + (0.60 * error * dt), 0.0] | max, 7.0] | min %}
-          {% elif error < -0.15 %}
-            {% set integral_level = [[prev_int + (0.40 * error * dt), 0.0] | max, 7.0] | min %}
-          {% else %}
-            {% set integral_level = [[prev_int, 0.0] | max, 7.0] | min %}
-          {% endif %}
-
-          {% if not prev_active %}
-            {% if error < 0.30 and not (error >= 0.15 and predicted_error >= 0.45) %}
-              {% set target_intensity = 0 %}
-            {% elif error > 1.5 or predicted_error > 1.5 %}
-              {% set target_intensity = 7 %}
-            {% else %}
-              {% set raw = integral_level + (1.8 * error) - (3.5 * rate) %}
-              {% set target_intensity = [[(raw | round(0) | int), 1] | max, 7] | min %}
-            {% endif %}
-          {% else %}
-            {% if error <= -0.45 or (error <= -0.15 and predicted_error <= -0.55) %}
-              {% set target_intensity = 0 %}
-            {% elif error > 1.5 or predicted_error > 1.5 %}
-              {% set target_intensity = 7 %}
-            {% else %}
-              {% set raw = integral_level + (1.8 * error) - (3.5 * rate) %}
-              {% set min_run = 1 if error > -0.15 else 0 %}
-              {% set target_intensity = [[(raw | round(0) | int), min_run] | max, 7] | min %}
-              {% if current > 0 and error >= -0.8 and error <= 1.2 and target_intensity > 0 %}
-                {% if target_intensity > current + 2 %}
-                  {% set target_intensity = [current + 2, 7] | min %}
-                {% elif target_intensity < current - 2 %}
-                  {% set target_intensity = [current - 2, 1] | max %}
-                {% endif %}
-              {% endif %}
-            {% endif %}
-          {% endif %}
-
-          {{ target_intensity | int }}
+        availability: "{{ pid is defined and pid is mapping and (pid.available | default(false)) }}"
+        state: "{{ pid.state }}"
         attributes:
-          controller_version: "4.7.0"
-          area_id: "eva"
-          device_count: >
-            {% set ns = namespace(cnt=0) %}
-            {% for dev in area_devices('eva') %}
-              {% if device_entities(dev) | select('match', '^humidifier\\.') | list | count > 0 %}
-                {% set ns.cnt = ns.cnt + 1 %}
-              {% endif %}
-            {% endfor %}
-            {{ ns.cnt }}
-          active_devices: >
-            {% set ns = namespace(cnt=0) %}
-            {% for dev in area_devices('eva') %}
-              {% set ents = device_entities(dev) %}
-              {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-              {% if hum != '' %}
-                {% set pwr = ents | select('match', '^switch\\..*_power(_\\d+)?$') | first | default('') %}
-                {% if is_state(hum, 'on') or (pwr != '' and is_state(pwr, 'on')) %}
-                  {% set ns.cnt = ns.cnt + 1 %}
-                {% endif %}
-              {% endif %}
-            {% endfor %}
-            {{ ns.cnt }}
-          raw_humidity: "{{ states('sensor.sensor_eva_humidity') | float(0) | round(2) }}"
-          filtered_humidity: "{{ (states('sensor.humidity_filtered') if has_value('sensor.humidity_filtered') else states('sensor.sensor_eva_humidity')) | float(0) | round(2) }}"
-          error: "{{ states('sensor.humidity_error') | float(0) }}"
-          rate: "{{ states('sensor.humidity_rate') | float(0) }}"
-          predicted_error: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {% set rate = states('sensor.humidity_rate') | float(0) %}
-            {{ (error - (rate * 5)) | round(2) }}
-          integral_level: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
-            {% set prev_int = attrs.get('integral_level', 0.0) | float(0.0) %}
-            {% set now_ts = as_timestamp(now()) %}
-            {% set prev_ts = attrs.get('last_int_ts', now_ts - 60) | float(now_ts - 60) %}
-            {% set dt = [[(now_ts - prev_ts) / 60.0, 0.0] | max, 2.0] | min %}
-            {% if error > 0.3 %}
-              {% set base_int = [prev_int, (1.0 if error > 0.5 else 0.0)] | max %}
-              {% set integral_level = [[base_int + (0.30 * error * dt), 0.0] | max, 7.0] | min %}
-            {% elif error <= -0.35 %}
-              {% set integral_level = [[prev_int + (0.60 * error * dt), 0.0] | max, 7.0] | min %}
-            {% elif error < -0.15 %}
-              {% set integral_level = [[prev_int + (0.40 * error * dt), 0.0] | max, 7.0] | min %}
-            {% else %}
-              {% set integral_level = [[prev_int, 0.0] | max, 7.0] | min %}
-            {% endif %}
-            {{ integral_level | round(3) }}
-          last_int_ts: "{{ as_timestamp(now()) | round(3) }}"
-          control_mode: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {% set rate = states('sensor.humidity_rate') | float(0) %}
-            {% set predicted = error - (rate * 5) %}
-            {% if predicted > 0.5 %}
-              humidifying
-            {% elif predicted < -0.5 %}
-              drying
-            {% else %}
-              stable
-            {% endif %}
-          overshoot: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {{ error < -0.5 }}
-          overshoot_pct: >
-            {% set error = states('sensor.humidity_error') | float(0) %}
-            {{ ([0, -error] | max) | round(2) }}
+          controller_version: "{{ pid.attributes.controller_version }}"
+          controller_generation: "{{ pid.attributes.controller_generation }}"
+          area_id: "{{ pid.attributes.area_id }}"
+          device_count: "{{ pid.attributes.device_count }}"
+          active_devices: "{{ pid.attributes.active_devices }}"
+          raw_humidity: "{{ pid.attributes.raw_humidity }}"
+          filtered_humidity: "{{ pid.attributes.filtered_humidity }}"
+          target_humidity: "{{ pid.attributes.target_humidity }}"
+          error: "{{ pid.attributes.error }}"
+          rate: "{{ pid.attributes.rate }}"
+          predicted_error: "{{ pid.attributes.predicted_error }}"
+          equilibrium_ml_h: "{{ pid.attributes.equilibrium_ml_h }}"
+          demand_ml_h: "{{ pid.attributes.demand_ml_h }}"
+          p_ml_h: "{{ pid.attributes.p_ml_h }}"
+          d_ml_h: "{{ pid.attributes.d_ml_h }}"
+          window_ff_ml_h: "{{ pid.attributes.window_ff_ml_h }}"
+          window_cover_pct: "{{ pid.attributes.window_cover_pct }}"
+          vapor_deficit_g_m3: "{{ pid.attributes.vapor_deficit_g_m3 }}"
+          anti_windup_state: "{{ pid.attributes.anti_windup_state }}"
+          control_mode: "{{ pid.attributes.control_mode }}"
+          l1_overshoot_minutes: "{{ pid.attributes.l1_overshoot_minutes }}"
+          overshoot: "{{ pid.attributes.overshoot }}"
+          overshoot_pct: "{{ pid.attributes.overshoot_pct }}"
+          h0: "{{ pid.attributes.h0 }}"
+          h1: "{{ pid.attributes.h1 }}"
+          h2: "{{ pid.attributes.h2 }}"
+          h3: "{{ pid.attributes.h3 }}"
+          last_update_ts: "{{ pid.attributes.last_update_ts }}"
 
   # ════════════════════════════════════════════════════════════════════════════
   #  EVA — БЛОК 4: ВИРТУАЛЬНЫЙ СЕНСОР УРОВНЯ ВОДЫ И ФАКТИЧЕСКАЯ ИНТЕНСИВНОСТЬ
@@ -885,13 +791,15 @@ template:
           {% endif %}
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  ZAP — БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ
+  #  ZAP — БЛОК 1: РАСЧЁТ СКОРОСТИ ИЗМЕНЕНИЯ ВЛАЖНОСТИ (3-мин МНК по измерению)
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
       - platform: time_pattern
         minutes: "/1"
+        id: "tick"
       - platform: homeassistant
         event: start
+        id: "startup"
     sensor:
       - name: "Humidity Zap Rate"
         unique_id: humidity_zap_rate
@@ -899,28 +807,52 @@ template:
         state_class: measurement
         icon: mdi:trending-up
         state: >
-          {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
+          {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
           {% set current = (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(none) %}
-          {% set prev_rate = (this.state if (this is defined and this.state is defined) else 0) | float(0) %}
+          {% set prev_rate = (this.state if (this is defined and this.state is defined and is_number(this.state)) else 0) | float(0) %}
           {% if current is none %}
             {{ prev_rate }}
           {% else %}
-            {% set old = attrs.get('h5', current) | float(current) %}
-            {% set rate = (current - old) / 5 %}
-            {{ (0.4 * rate + 0.6 * prev_rate) | round(3) }}
+            {% set is_tick = (trigger is defined and trigger.id == 'tick') %}
+            {% set p0 = attrs.get('h0', current) | float(current) %}
+            {% set p1 = attrs.get('h1', p0) | float(p0) %}
+            {% set p2 = attrs.get('h2', p1) | float(p1) %}
+            {% set p3 = attrs.get('h3', p2) | float(p2) %}
+            {% set h0 = current %}
+            {% set h1 = p0 if is_tick else p1 %}
+            {% set h2 = p1 if is_tick else p2 %}
+            {% set h3 = p2 if is_tick else p3 %}
+            {{ ((3.0 * h0 + h1 - h2 - 3.0 * h3) / 10.0) | round(4) }}
           {% endif %}
         attributes:
-          h1: "{{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) }}"
-          h2: "{{ (this.attributes.get('h1') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity'), true) | float(0) }}"
-          h3: "{{ (this.attributes.get('h2') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity'), true) | float(0) }}"
-          h4: "{{ (this.attributes.get('h3') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity'), true) | float(0) }}"
-          h5: "{{ (this.attributes.get('h4') if (this is defined and this.attributes is defined) else none) | default(states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity'), true) | float(0) }}"
+          h0: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% if has_value('sensor.humidity_zap_filtered') or has_value('sensor.sensor_zap_humidity') %}
+              {{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) | round(3) }}
+            {% else %}
+              {{ attrs.get('h0', 0) | float(0) | round(3) }}
+            {% endif %}
+          h1: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_zap_filtered') or has_value('sensor.sensor_zap_humidity') %}
+            {% set cur = (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) if ok else (attrs.get('h0', 0) | float(0)) %}
+            {{ (attrs.get('h0', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h1', cur)) | float(cur) | round(3) }}
+          h2: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_zap_filtered') or has_value('sensor.sensor_zap_humidity') %}
+            {% set cur = (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) if ok else (attrs.get('h1', 0) | float(0)) %}
+            {{ (attrs.get('h1', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h2', cur)) | float(cur) | round(3) }}
+          h3: >-
+            {% set attrs = this.attributes if (this is defined and this.attributes is mapping) else {} %}
+            {% set ok = has_value('sensor.humidity_zap_filtered') or has_value('sensor.sensor_zap_humidity') %}
+            {% set cur = (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) if ok else (attrs.get('h2', 0) | float(0)) %}
+            {{ (attrs.get('h2', cur) if (ok and trigger is defined and trigger.id == 'tick') else attrs.get('h3', cur)) | float(cur) | round(3) }}
           current_humidity: "{{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) }}"
           raw_humidity: "{{ states('sensor.sensor_zap_humidity') | float(0) | round(2) }}"
           filtered_humidity: "{{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) | round(2) }}"
-          derivative_slope_5m: "{{ states('sensor.humidity_zap_slope') | float(0) | round(3) }}"
-          filter_type: "ema_lowpass"
-          minutes_window: 5
+          derivative_slope_3m: "{{ states('sensor.humidity_zap_slope') | float(0) | round(3) }}"
+          filter_type: "ols_3m_lowpass4"
+          minutes_window: 3
 
   # ════════════════════════════════════════════════════════════════════════════
   #  ZAP — БЛОК 2: ЦЕЛЬ И ОШИБКА РЕГУЛИРОВАНИЯ
@@ -971,7 +903,7 @@ template:
             {{ states('input_number.humidity_zap_target') | float(35) | round(1) }}
           {% endif %}
         attributes:
-          controller_version: "4.7.0"
+          controller_version: "4.8.0"
           area_id: "zap"
           target_mode: >
             {% if is_state('input_boolean.humidity_zap_adaptive_target', 'on') %}
@@ -1019,184 +951,67 @@ template:
         attributes:
           raw_humidity: "{{ states('sensor.sensor_zap_humidity') | float(0) | round(2) }}"
           filtered_humidity: "{{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) | round(2) }}"
-          target_humidity: "{{ states('sensor.humidity_zap_target_humidity') | float(35) | round(1) }}"
+          target_humidity: >-
+            {% if is_state('input_boolean.humidity_zap_adaptive_target', 'on') and has_value('sensor.sensor_zap_temperature') %}
+              {{ [[(75 - 1.25 * (states('sensor.sensor_zap_temperature') | float(22))), 60] | min | float, 35] | max | round(1) }}
+            {% else %}
+              {{ states('input_number.humidity_zap_target') | float(35) | round(1) }}
+            {% endif %}
           error_source: "filtered_humidity_error"
 
   # ════════════════════════════════════════════════════════════════════════════
-  #  ZAP — БЛОК 3: ПЛОТНЫЙ PI+D-РЕГУЛЯТОР (0..7) ПО AREA DEVICES
+  #  ZAP — БЛОК 3: 2-DOF PID В ФИЗИЧЕСКИХ МЛ/Ч (custom_templates/humidity.jinja)
   # ════════════════════════════════════════════════════════════════════════════
   - trigger:
-      - platform: state
-        entity_id:
-          - sensor.humidity_zap_error
-          - sensor.humidity_zap_rate
-          - humidifier.humidifier_puh_9105_puh_2709_humidifier_2
-          - number.humidifier_puh_9105_puh_2709_intensity_2
-          - switch.humidifier_puh_9105_puh_2709_power_2
-      - platform: homeassistant
-        event: start
       - platform: time_pattern
         minutes: "/1"
+        id: "tick"
+      - platform: state
+        entity_id:
+          - input_number.humidity_zap_target
+          - input_boolean.humidity_zap_adaptive_target
+          - input_boolean.humidifier_zap_refill_pending
+        id: "target_change"
+    variables:
+      pid: >-
+        {% from 'humidity.jinja' import calc_humidity_pid %}
+        {{ calc_humidity_pid('zap', trigger.id if (trigger is defined and trigger.id is defined) else 'tick') | from_json }}
     sensor:
       - name: "Humidity Zap Recommended Intensity"
         unique_id: humidity_zap_recommended_intensity
         state_class: measurement
         icon: mdi:gauge
-        availability: >
-          {% set ns = namespace(has_hum=false) %}
-          {% for dev in area_devices('zap') %}
-            {% set ents = device_entities(dev) %}
-            {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-            {% set int_ent = ents | select('match', '^number\\..*_intensity(_\\d+)?$') | first | default('') %}
-            {% if hum != '' and states(hum) not in ['unavailable', 'unknown'] and int_ent != '' and has_value(int_ent) %}
-              {% set ns.has_hum = true %}
-            {% endif %}
-          {% endfor %}
-          {{ has_value('sensor.humidity_zap_error') and
-             has_value('sensor.humidity_zap_rate') and
-             ns.has_hum }}
-        state: >
-          {% set error = states('sensor.humidity_zap_error') | float(0) %}
-          {% set rate = states('sensor.humidity_zap_rate') | float(0) %}
-          {% set ns_dev = namespace(active_max=0, has_on=false) %}
-          {% for dev in area_devices('zap') %}
-            {% set ents = device_entities(dev) %}
-            {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-            {% if hum != '' %}
-              {% set pwr = ents | select('match', '^switch\\..*_power(_\\d+)?$') | first | default('') %}
-              {% set int_ent = ents | select('match', '^number\\..*_intensity(_\\d+)?$') | first | default('') %}
-              {% set is_on = is_state(hum, 'on') or (pwr != '' and is_state(pwr, 'on')) %}
-              {% if is_on %}
-                {% set ns_dev.has_on = true %}
-                {% if int_ent != '' and has_value(int_ent) %}
-                  {% set val = states(int_ent) | int(0) %}
-                  {% if val > ns_dev.active_max %}
-                    {% set ns_dev.active_max = val %}
-                  {% endif %}
-                {% endif %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-          {% set current = ns_dev.active_max if ns_dev.has_on else 0 %}
-          {% set prev_rec = (this.state | int(0)) if (this is defined and this.state is defined and this.state not in ['unknown', 'unavailable']) else current %}
-          {% set prev_active = (prev_rec > 0) or ns_dev.has_on %}
-
-          {% set PREDICTION_MINUTES = 5 %}
-          {% set predicted_error = error - (rate * PREDICTION_MINUTES) %}
-          {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
-          {% set prev_int = attrs.get('integral_level', 0.0) | float(0.0) %}
-          {% set now_ts = as_timestamp(now()) %}
-          {% set prev_ts = attrs.get('last_int_ts', now_ts - 60) | float(now_ts - 60) %}
-          {% set dt = [[(now_ts - prev_ts) / 60.0, 0.0] | max, 2.0] | min %}
-
-          {% if error > 0.3 %}
-            {% set base_int = [prev_int, (1.0 if error > 0.5 else 0.0)] | max %}
-            {% set integral_level = [[base_int + (0.30 * error * dt), 0.0] | max, 7.0] | min %}
-          {% elif error <= -0.35 %}
-            {% set integral_level = [[prev_int + (0.60 * error * dt), 0.0] | max, 7.0] | min %}
-          {% elif error < -0.15 %}
-            {% set integral_level = [[prev_int + (0.40 * error * dt), 0.0] | max, 7.0] | min %}
-          {% else %}
-            {% set integral_level = [[prev_int, 0.0] | max, 7.0] | min %}
-          {% endif %}
-
-          {% if not prev_active %}
-            {% if error < 0.30 and not (error >= 0.15 and predicted_error >= 0.45) %}
-              {% set target_intensity = 0 %}
-            {% elif error > 1.5 or predicted_error > 1.5 %}
-              {% set target_intensity = 7 %}
-            {% else %}
-              {% set raw = integral_level + (1.8 * error) - (3.5 * rate) %}
-              {% set target_intensity = [[(raw | round(0) | int), 1] | max, 7] | min %}
-            {% endif %}
-          {% else %}
-            {% if error <= -0.45 or (error <= -0.15 and predicted_error <= -0.55) %}
-              {% set target_intensity = 0 %}
-            {% elif error > 1.5 or predicted_error > 1.5 %}
-              {% set target_intensity = 7 %}
-            {% else %}
-              {% set raw = integral_level + (1.8 * error) - (3.5 * rate) %}
-              {% set min_run = 1 if error > -0.15 else 0 %}
-              {% set target_intensity = [[(raw | round(0) | int), min_run] | max, 7] | min %}
-              {% if current > 0 and error >= -0.8 and error <= 1.2 and target_intensity > 0 %}
-                {% if target_intensity > current + 2 %}
-                  {% set target_intensity = [current + 2, 7] | min %}
-                {% elif target_intensity < current - 2 %}
-                  {% set target_intensity = [current - 2, 1] | max %}
-                {% endif %}
-              {% endif %}
-            {% endif %}
-          {% endif %}
-
-          {{ target_intensity | int }}
+        availability: "{{ pid is defined and pid is mapping and (pid.available | default(false)) }}"
+        state: "{{ pid.state }}"
         attributes:
-          controller_version: "4.7.0"
-          area_id: "zap"
-          device_count: >
-            {% set ns = namespace(cnt=0) %}
-            {% for dev in area_devices('zap') %}
-              {% if device_entities(dev) | select('match', '^humidifier\\.') | list | count > 0 %}
-                {% set ns.cnt = ns.cnt + 1 %}
-              {% endif %}
-            {% endfor %}
-            {{ ns.cnt }}
-          active_devices: >
-            {% set ns = namespace(cnt=0) %}
-            {% for dev in area_devices('zap') %}
-              {% set ents = device_entities(dev) %}
-              {% set hum = ents | select('match', '^humidifier\\.') | first | default('') %}
-              {% if hum != '' %}
-                {% set pwr = ents | select('match', '^switch\\..*_power(_\\d+)?$') | first | default('') %}
-                {% if is_state(hum, 'on') or (pwr != '' and is_state(pwr, 'on')) %}
-                  {% set ns.cnt = ns.cnt + 1 %}
-                {% endif %}
-              {% endif %}
-            {% endfor %}
-            {{ ns.cnt }}
-          raw_humidity: "{{ states('sensor.sensor_zap_humidity') | float(0) | round(2) }}"
-          filtered_humidity: "{{ (states('sensor.humidity_zap_filtered') if has_value('sensor.humidity_zap_filtered') else states('sensor.sensor_zap_humidity')) | float(0) | round(2) }}"
-          error: "{{ states('sensor.humidity_zap_error') | float(0) }}"
-          rate: "{{ states('sensor.humidity_zap_rate') | float(0) }}"
-          predicted_error: >
-            {% set error = states('sensor.humidity_zap_error') | float(0) %}
-            {% set rate = states('sensor.humidity_zap_rate') | float(0) %}
-            {{ (error - (rate * 5)) | round(2) }}
-          integral_level: >
-            {% set error = states('sensor.humidity_zap_error') | float(0) %}
-            {% set attrs = this.attributes if (this is defined and this.attributes is defined) else {} %}
-            {% set prev_int = attrs.get('integral_level', 0.0) | float(0.0) %}
-            {% set now_ts = as_timestamp(now()) %}
-            {% set prev_ts = attrs.get('last_int_ts', now_ts - 60) | float(now_ts - 60) %}
-            {% set dt = [[(now_ts - prev_ts) / 60.0, 0.0] | max, 2.0] | min %}
-            {% if error > 0.3 %}
-              {% set base_int = [prev_int, (1.0 if error > 0.5 else 0.0)] | max %}
-              {% set integral_level = [[base_int + (0.30 * error * dt), 0.0] | max, 7.0] | min %}
-            {% elif error <= -0.35 %}
-              {% set integral_level = [[prev_int + (0.60 * error * dt), 0.0] | max, 7.0] | min %}
-            {% elif error < -0.15 %}
-              {% set integral_level = [[prev_int + (0.40 * error * dt), 0.0] | max, 7.0] | min %}
-            {% else %}
-              {% set integral_level = [[prev_int, 0.0] | max, 7.0] | min %}
-            {% endif %}
-            {{ integral_level | round(3) }}
-          last_int_ts: "{{ as_timestamp(now()) | round(3) }}"
-          control_mode: >
-            {% set error = states('sensor.humidity_zap_error') | float(0) %}
-            {% set rate = states('sensor.humidity_zap_rate') | float(0) %}
-            {% set predicted = error - (rate * 5) %}
-            {% if predicted > 0.5 %}
-              humidifying
-            {% elif predicted < -0.5 %}
-              drying
-            {% else %}
-              stable
-            {% endif %}
-          overshoot: >
-            {% set error = states('sensor.humidity_zap_error') | float(0) %}
-            {{ error < -0.5 }}
-          overshoot_pct: >
-            {% set error = states('sensor.humidity_zap_error') | float(0) %}
-            {{ ([0, -error] | max) | round(2) }}
+          controller_version: "{{ pid.attributes.controller_version }}"
+          controller_generation: "{{ pid.attributes.controller_generation }}"
+          area_id: "{{ pid.attributes.area_id }}"
+          device_count: "{{ pid.attributes.device_count }}"
+          active_devices: "{{ pid.attributes.active_devices }}"
+          raw_humidity: "{{ pid.attributes.raw_humidity }}"
+          filtered_humidity: "{{ pid.attributes.filtered_humidity }}"
+          target_humidity: "{{ pid.attributes.target_humidity }}"
+          error: "{{ pid.attributes.error }}"
+          rate: "{{ pid.attributes.rate }}"
+          predicted_error: "{{ pid.attributes.predicted_error }}"
+          equilibrium_ml_h: "{{ pid.attributes.equilibrium_ml_h }}"
+          demand_ml_h: "{{ pid.attributes.demand_ml_h }}"
+          p_ml_h: "{{ pid.attributes.p_ml_h }}"
+          d_ml_h: "{{ pid.attributes.d_ml_h }}"
+          window_ff_ml_h: "{{ pid.attributes.window_ff_ml_h }}"
+          window_cover_pct: "{{ pid.attributes.window_cover_pct }}"
+          vapor_deficit_g_m3: "{{ pid.attributes.vapor_deficit_g_m3 }}"
+          anti_windup_state: "{{ pid.attributes.anti_windup_state }}"
+          control_mode: "{{ pid.attributes.control_mode }}"
+          l1_overshoot_minutes: "{{ pid.attributes.l1_overshoot_minutes }}"
+          overshoot: "{{ pid.attributes.overshoot }}"
+          overshoot_pct: "{{ pid.attributes.overshoot_pct }}"
+          h0: "{{ pid.attributes.h0 }}"
+          h1: "{{ pid.attributes.h1 }}"
+          h2: "{{ pid.attributes.h2 }}"
+          h3: "{{ pid.attributes.h3 }}"
+          last_update_ts: "{{ pid.attributes.last_update_ts }}"
 
   # ════════════════════════════════════════════════════════════════════════════
   #  ZAP — БЛОК 4: ВИРТУАЛЬНЫЙ СЕНСОР УРОВНЯ ВОДЫ И ФАКТИЧЕСКАЯ ИНТЕНСИВНОСТЬ
@@ -1955,7 +1770,7 @@ script:
                                   {% set target_v = desired_int | int(1) %}
                                   {% set lc = states[int_ent].last_changed if states[int_ent] is not none else none %}
                                   {% set elapsed = (as_timestamp(now()) - as_timestamp(lc)) if lc is not none else 999 %}
-                                  {{ target_v != cur and (cur == 0 or (mode_was_wrong | bool(false)) or elapsed > 25) }}
+                                  {{ target_v != cur and (cur == 0 or (mode_was_wrong | bool(false)) or elapsed > 8) }}
                                 {% endif %}
                           then:
                             - service: number.set_value
